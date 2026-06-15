@@ -70,7 +70,7 @@ function buildSystemPrompt(rascunho) {
 _Responda *SIM* para confirmar ou me diga se quer alterar algo._
 
 ## REGRA DE FRETE
-- Delivery: taxa de R$ 5,00 (GRÁTIS se subtotal ≥ R$ 50,00)
+- Delivery: taxa fixa de R$ 5,00 sempre (sem exceção)
 - Retirada no local: sem taxa
 - NUNCA escreva "frete incluso" — sempre mostre subtotal e total separados quando houver taxa`;
 }

@@ -51,13 +51,27 @@ async function carregarRascunho(telefone) {
 }
 
 async function salvarRascunho(telefone, campos) {
-  const { error } = await sb
+  const update = { ...campos, updated_at: new Date().toISOString() };
+
+  // Tenta atualizar; se não existir ainda, insere
+  const { data: existing } = await sb
     .from('pedido_rascunho')
-    .upsert(
-      { telefone, ...campos, updated_at: new Date().toISOString() },
-      { onConflict: 'telefone' }
-    );
-  if (error) throw new Error(`Supabase/salvarRascunho: ${error.message}`);
+    .select('telefone')
+    .eq('telefone', telefone)
+    .maybeSingle();
+
+  if (existing) {
+    const { error } = await sb
+      .from('pedido_rascunho')
+      .update(update)
+      .eq('telefone', telefone);
+    if (error) throw new Error(`Supabase/salvarRascunho(update): ${error.message}`);
+  } else {
+    const { error } = await sb
+      .from('pedido_rascunho')
+      .insert({ telefone, ...update });
+    if (error) throw new Error(`Supabase/salvarRascunho(insert): ${error.message}`);
+  }
 }
 
 async function limparRascunho(telefone) {
@@ -134,7 +148,7 @@ async function atualizarStatsCliente(clienteId, totalPedido, totalAnterior, pedi
 async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens }) {
   const tel = String(telefone).replace(/\D/g, '');
   const subtotal = itens.reduce((s, i) => s + Number(i.preco_unitario) * Number(i.quantidade), 0);
-  const taxaEntrega = tipoEntrega === 'delivery' ? (subtotal >= 50 ? 0 : 5) : 0;
+  const taxaEntrega = tipoEntrega === 'delivery' ? 5 : 0;
   const total = subtotal + taxaEntrega;
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);

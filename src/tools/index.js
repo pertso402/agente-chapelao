@@ -108,7 +108,7 @@ async function executarTool(nome, args, contexto = {}) {
         chave_pix: info.chave_pix || '',
         horario: info.horario_funcionamento || 'Segunda a Sábado, 10h às 15h',
         loja_aberta: info.loja_aberta !== 'false',
-        taxa_entrega: 'R$ 5,00 (grátis acima de R$ 50)',
+        taxa_entrega: 'R$ 5,00 (delivery) / grátis (retirada)',
       });
     }
 
