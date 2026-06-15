@@ -1,10 +1,12 @@
 'use strict';
 
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
 const sb = createClient(
   process.env.SUPA_URL,
-  process.env.SUPA_SERVICE_KEY
+  process.env.SUPA_SERVICE_KEY,
+  { realtime: { transport: ws } }
 );
 
 // ─── HISTÓRICO DE CONVERSA ────────────────────────────────────────────────────
