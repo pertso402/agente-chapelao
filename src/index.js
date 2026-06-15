@@ -70,7 +70,7 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  const { telefone, pushName, tipo, mensagemRaw } = msg;
+  const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
   logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: conteudo.slice(0, 60) });
@@ -79,16 +79,29 @@ app.post('/webhook', async (req, res) => {
     // ── 3. Processar mídia ─────────────────────────────────────────────────
     if (tipo === 'audioMessage') {
       logger.step(requestId, telefone, 'midia/audio');
-      const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
-      const transcricao = await comRetry(() => transcreverAudio(midia.base64, midia.mimetype), { tentativas: 2, requestId, etapa: 'whisper' });
+      // base64 já vem no webhook quando webhookBase64=true; só baixa se não vier
+      let midiaB64 = base64Inline;
+      let midiaMime = mimetypeInline || 'audio/ogg';
+      if (!midiaB64) {
+        const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
+        midiaB64  = midia.base64;
+        midiaMime = midia.mimetype || 'audio/ogg';
+      }
+      const transcricao = await comRetry(() => transcreverAudio(midiaB64, midiaMime), { tentativas: 2, requestId, etapa: 'whisper' });
       conteudo = `🎙️ [Áudio]: ${transcricao}`;
       logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
     }
 
     if (tipo === 'imageMessage') {
       logger.step(requestId, telefone, 'midia/imagem');
-      const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
-      const { analise, isComprovante } = await comRetry(() => analisarImagem(midia.base64, midia.mimetype), { tentativas: 2, requestId, etapa: 'gptVision' });
+      let midiaB64 = base64Inline;
+      let midiaMime = mimetypeInline || 'image/jpeg';
+      if (!midiaB64) {
+        const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
+        midiaB64  = midia.base64;
+        midiaMime = midia.mimetype || 'image/jpeg';
+      }
+      const { analise, isComprovante } = await comRetry(() => analisarImagem(midiaB64, midiaMime), { tentativas: 2, requestId, etapa: 'gptVision' });
       conteudo = isComprovante
         ? `📎 COMPROVANTE PIX CONFIRMADO: ${analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
         : `📎 [Imagem]: ${analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;

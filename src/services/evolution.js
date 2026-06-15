@@ -49,7 +49,12 @@ function extrairMensagem(body) {
     return null; // tipo não suportado
   }
 
-  return { telefone, pushName, tipo, texto, mensagemRaw: message };
+  // Quando webhookBase64=true, Evolution já inclui o base64 no payload
+  const base64   = data.base64   || message.base64   || null;
+  const mimetype = data.mimetype || message.mimetype ||
+    message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
+
+  return { telefone, pushName, tipo, texto, mensagemRaw: message, base64, mimetype };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────
