@@ -6,12 +6,15 @@
 // para consulta no dashboard sem precisar entrar no servidor.
 
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
 let supabase = null;
 
 function getSupabase() {
   if (!supabase && process.env.SUPA_URL && process.env.SUPA_SERVICE_KEY) {
-    supabase = createClient(process.env.SUPA_URL, process.env.SUPA_SERVICE_KEY);
+    supabase = createClient(process.env.SUPA_URL, process.env.SUPA_SERVICE_KEY, {
+      realtime: { transport: ws },
+    });
   }
   return supabase;
 }
