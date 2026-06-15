@@ -3,6 +3,7 @@
 const OpenAI = require('openai');
 const { TOOLS, executarTool } = require('./tools');
 const { salvarRascunho, limparRascunho, criarPedidoCompleto } = require('./services/supabase');
+const { avaliarRascunho, descreverFaltando, parseItens } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
 const logger = require('./logger');
 
@@ -17,62 +18,64 @@ const MAX_ITER = 8;
 // ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(rascunho) {
-  const estado = rascunho
-    ? `\n\n## ESTADO ATUAL DO PEDIDO (dados já coletados — NÃO pergunte de novo)\n${[
-        rascunho.nome_cliente   && `- Nome: ${rascunho.nome_cliente}`,
-        rascunho.itens          && `- Itens: ${rascunho.itens}`,
-        rascunho.tipo_entrega   && `- Entrega: ${rascunho.tipo_entrega}`,
-        rascunho.endereco       && `- Endereço: ${rascunho.endereco}`,
-        rascunho.forma_pagamento && `- Pagamento: ${rascunho.forma_pagamento}`,
-        rascunho.etapa_atual    && `- Etapa: ${rascunho.etapa_atual}`,
-      ].filter(Boolean).join('\n')}`
-    : '';
+  let estado = '';
+  if (rascunho) {
+    const av = avaliarRascunho(rascunho);
+    const itens = parseItens(rascunho.itens);
+    const linhas = [
+      itens.length          && `- Itens: ${itens.map(i => `${i.quantidade}x ${i.nome}`).join(', ')}`,
+      rascunho.nome_cliente && `- Nome: ${rascunho.nome_cliente}`,
+      rascunho.tipo_entrega && `- Entrega: ${rascunho.tipo_entrega}`,
+      rascunho.endereco     && `- Endereço: ${rascunho.endereco}`,
+      rascunho.forma_pagamento && `- Pagamento: ${rascunho.forma_pagamento}`,
+    ].filter(Boolean);
 
-  return `Você é "Chapinha" 🎩, assistente virtual do Restaurante Chapelão — marmitaria com comida caseira de verdade.
+    estado = `\n\n## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`;
+    if (av.completo) {
+      estado += `\n\n✅ TUDO COLETADO. Apresente o RESUMO FINAL e peça *SIM*. NÃO chame mais salvar_dados_pedido.`;
+    } else {
+      estado += `\n\n⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural.`;
+    }
+  }
+
+  return `Você é "Chapinha" 🎩, o atendente virtual do Restaurante Chapelão — uma marmitaria de comida caseira de verdade em Umuarama-PR.
 
 ## PERSONALIDADE
-- Caloroso, simpático, direto e eficiente
-- Português brasileiro natural, leve, com algum humor
-- Emojis com moderação
-- Trate o cliente pelo nome quando souber${estado}
+- Caloroso, simpático, ágil e objetivo. Português brasileiro natural, com leveza e bom humor.
+- Emojis com moderação. Trate o cliente pelo nome quando souber.
+- Mensagens curtas e claras (é WhatsApp). Conduza a conversa — não deixe o cliente perdido.${estado}
 
-## FLUXO OBRIGATÓRIO
-1. Saudação + apresentação breve (bom dia/tarde/noite conforme horário do Brasil)
-2. Pergunte o que o cliente deseja
-3. Cardápio → use buscar_cardapio ANTES de citar qualquer produto. Para marmitex, sempre chame buscar_mistura_do_dia também
-4. Auxilie na escolha. Quando o cliente decidir, confirme os itens
-5. Salve os itens imediatamente com salvar_dados_pedido (etapa_atual: "coletando_dados")
-6. Colete: nome completo → delivery ou retirada → endereço se delivery
-7. Salve cada dado coletado com salvar_dados_pedido
-8. Pergunte a forma de pagamento (PIX, dinheiro ou cartão)
-9. Com TODOS os dados, salve com etapa_atual: "aguardando_confirmacao" e apresente RESUMO FINAL
-10. No resumo, instrua: "Responda SIM para confirmar o pedido" (o sistema processa automaticamente)
-11. PIX → use info_restaurante para a chave, envie, diga para mandar o comprovante
-12. Ao receber "📎 COMPROVANTE PIX CONFIRMADO" → use atualizar_status_pedido com "aguardando_preparo"
-13. Confirme pedido em preparo + prazo (delivery ~35min, retirada ~20min)
+## SEU OBJETIVO
+Conduzir o cliente do "oi" até o pedido confirmado, SEM falhar nenhuma etapa. Você coleta e organiza; o SISTEMA fecha o pedido.
 
-## REGRAS CRÍTICAS
-⛔ NUNCA invente produtos, preços ou chave PIX — use as tools
-⛔ NUNCA chame criar_pedido — o SISTEMA cria automaticamente quando cliente responde SIM
-⛔ NUNCA pergunte algo que já está no ESTADO ATUAL DO PEDIDO acima
-⛔ Se loja fechada (info_restaurante retorna loja_aberta:false) → informe horário, não aceite pedido
-⛔ Imagem que NÃO é comprovante: diga o que viu e continue o atendimento normalmente
+## FLUXO DE ATENDIMENTO (conduza ativamente)
+1. Saudação calorosa + pergunte o que a pessoa deseja hoje.
+2. Para mostrar itens/preços: chame buscar_cardapio ANTES. Para marmitex: chame TAMBÉM buscar_mistura_do_dia.
+3. Ajude a escolher. A cada item decidido, chame salvar_dados_pedido com os itens (use os NOMES EXATOS do cardápio).
+4. Pergunte: entrega (delivery) ou retirada? → se delivery, peça o endereço completo.
+5. Pergunte a forma de pagamento: PIX, dinheiro ou cartão.
+6. SEMPRE que coletar algo, chame salvar_dados_pedido. O retorno te diz o que ainda falta.
+7. Quando o retorno disser "PRONTO_PARA_CONFIRMACAO": apresente o RESUMO FINAL e peça *SIM*.
+8. Após o pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", chame atualizar_status_pedido com "aguardando_preparo" e agradeça.
+
+## REGRAS CRÍTICAS (NUNCA quebrar)
+⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
+⛔ NUNCA escreva "frete incluso". A taxa de entrega é à parte (use info_restaurante para o valor).
+⛔ NUNCA pergunte algo que já está no ESTADO ATUAL acima.
+⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem confirma é o SISTEMA após o cliente dizer SIM.
+⛔ Se um item não existir no cardápio (a tool avisa em "itens_nao_encontrados"), peça para o cliente escolher um nome válido.
+⛔ Se a loja estiver fechada (info_restaurante → loja_aberta:false), informe o horário e não monte pedido.
 
 ## FORMATO DO RESUMO FINAL (obrigatório antes do SIM)
-🎩 *Resumo do seu pedido:*
-[lista de itens com qtd e valor]
-📍 [Entrega/Retirada]: [endereço ou "no local"]
+🎩 *Confira seu pedido:*
+[qtd]x [item] — R$ [valor] (uma linha por item)
+📍 [Entrega no endereço X | Retirada no local]
 💳 Pagamento: [forma]
 🛍️ Subtotal: R$ X,XX
-🚴 Taxa de entrega: R$ 5,00 ← incluir SOMENTE se for delivery. Se retirada, omitir esta linha.
-💰 *Total: R$ X,XX* ← subtotal + taxa de entrega (nunca dizer "frete incluso")
+🚴 Taxa de entrega: R$ X,XX  ← só se for delivery
+💰 *Total: R$ X,XX*  ← subtotal + taxa
 
-_Responda *SIM* para confirmar ou me diga se quer alterar algo._
-
-## REGRA DE FRETE
-- Delivery: taxa fixa de R$ 5,00 sempre (sem exceção)
-- Retirada no local: sem taxa
-- NUNCA escreva "frete incluso" — sempre mostre subtotal e total separados quando houver taxa`;
+_Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -85,14 +88,13 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     { role: 'user', content: mensagemUsuario },
   ];
 
+  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho) };
+
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL,
     historico_msgs: historico.length,
-    tem_rascunho: !!rascunho,
     etapa: rascunho?.etapa_atual || 'inicio',
   });
-
-  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho) };
 
   let resposta = await comRetry(
     () => openai.chat.completions.create({
@@ -114,28 +116,23 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     messages.push(assistantMsg);
 
     const toolResults = [];
-
     for (const toolCall of (assistantMsg.tool_calls || [])) {
-      const nome = toolCall.function.name;
+      const nomeTool = toolCall.function.name;
       let args = {};
       try { args = JSON.parse(toolCall.function.arguments || '{}'); } catch {}
 
-      logger.step(requestId, telefone, `tool/${nome}`, { args });
+      logger.step(requestId, telefone, `tool/${nomeTool}`, { args });
 
       let resultado;
       try {
-        resultado = await executarTool(nome, args, { telefone });
-        logger.info(`tool/${nome}/ok`, 'Executada com sucesso', { requestId, telefone });
+        resultado = await executarTool(nomeTool, args, { telefone });
+        logger.info(`tool/${nomeTool}/ok`, 'Executada', { requestId, telefone });
       } catch (err) {
-        resultado = `ERRO em ${nome}: ${err.message}`;
-        logger.error(`tool/${nome}/erro`, err.message, { requestId, telefone, stack: err.stack });
+        resultado = `ERRO em ${nomeTool}: ${err.message}`;
+        logger.error(`tool/${nomeTool}/erro`, err.message, { requestId, telefone, stack: err.stack });
       }
 
-      toolResults.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: String(resultado),
-      });
+      toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: String(resultado) });
     }
 
     messages.push(...toolResults);
@@ -158,7 +155,6 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   }
 
   const textoFinal = resposta.choices[0].message?.content?.trim() || '';
-
   logger.step(requestId, telefone, 'agente/ok', {
     iteracoes,
     finish_reason: resposta.choices[0].finish_reason,
@@ -168,40 +164,56 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   return textoFinal;
 }
 
-// ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente) ─────────────────────────
-// Cria o pedido diretamente no banco — sem depender do agente chamar a tool.
+// ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente, no código) ──────────────
+// Cria o pedido diretamente. Trava anti-duplicação: vira a etapa ANTES de criar.
 
 async function confirmarPedido(rascunho, telefone, requestId) {
-  let itens;
-  try {
-    itens = typeof rascunho.itens === 'string' ? JSON.parse(rascunho.itens) : rascunho.itens;
-  } catch {
-    throw new Error('Itens do rascunho inválidos para criar pedido.');
+  // Revalidação defensiva — só confirma se realmente está completo
+  const av = avaliarRascunho(rascunho);
+  if (!av.completo) {
+    const erro = new Error(`Rascunho incompleto: falta ${descreverFaltando(av.faltando)}`);
+    erro.faltando = av.faltando;
+    throw erro;
   }
 
-  const resultado = await comRetry(
-    () => criarPedidoCompleto({
-      nomeCliente:     rascunho.nome_cliente,
-      telefone,
-      tipoEntrega:     rascunho.tipo_entrega,
-      endereco:        rascunho.endereco,
-      formaPagamento:  rascunho.forma_pagamento,
-      itens,
-    }),
-    { tentativas: 2, requestId, etapa: 'confirmarPedido' }
-  );
+  // Trava: marca como "processando" para que um SIM duplicado não reentre
+  await salvarRascunho(telefone, { etapa_atual: 'processando' });
 
-  // Atualizar etapa no rascunho (mantém dados para referência, muda etapa)
-  await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix' });
+  let resultado;
+  try {
+    resultado = await comRetry(
+      () => criarPedidoCompleto({
+        nomeCliente:    rascunho.nome_cliente,
+        telefone,
+        tipoEntrega:    rascunho.tipo_entrega,
+        endereco:       rascunho.endereco,
+        formaPagamento: rascunho.forma_pagamento,
+        itens:          rascunho.itens,
+      }),
+      { tentativas: 2, requestId, etapa: 'confirmarPedido' }
+    );
+  } catch (err) {
+    // Reverte para permitir nova tentativa do cliente
+    await salvarRascunho(telefone, { etapa_atual: 'aguardando_confirmacao' });
+    throw err;
+  }
+
+  if (resultado.formaPagamento === 'pix') {
+    // Mantém o rascunho aguardando comprovante
+    await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix' });
+  } else {
+    // Pedido fechado — limpa o rascunho para a próxima conversa começar zerada
+    await limparRascunho(telefone);
+  }
 
   logger.info('pedido/criado', 'Pedido registrado via SIM', {
-    requestId,
-    telefone,
+    requestId, telefone,
     numero_pedido: resultado.numeroPedido,
     total: resultado.total,
+    forma: resultado.formaPagamento,
   });
 
   return resultado;
 }
 
-module.exports = { rodarAgente, confirmarPedido };
+module.exports = { rodarAgente, confirmarPedido, buildSystemPrompt };

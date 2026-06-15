@@ -7,29 +7,41 @@ const { v4: uuid } = require('uuid');
 const logger = require('./logger');
 const { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando } = require('./services/evolution');
 const { transcreverAudio, analisarImagem } = require('./services/media');
-const { carregarHistorico, salvarMensagem, carregarRascunho, salvarRascunho, limparRascunho } = require('./services/supabase');
+const {
+  carregarHistorico, salvarMensagem,
+  carregarRascunho, limparRascunho,
+  buscarInfo, atualizarStatusPedido,
+} = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+
 // ─── DEDUPLICAÇÃO DE MENSAGENS ────────────────────────────────────────────────
-// Evolution API pode enviar o mesmo evento mais de uma vez.
-// Usamos um Map com TTL para evitar processamento duplicado.
-
 const msgProcessadas = new Map();
-
 function jaProcessada(msgId) {
   if (!msgId) return false;
   const agora = Date.now();
-  // Limpar entradas antigas (> 2min)
   for (const [id, ts] of msgProcessadas) {
     if (agora - ts > 120_000) msgProcessadas.delete(id);
   }
   if (msgProcessadas.has(msgId)) return true;
   msgProcessadas.set(msgId, agora);
   return false;
+}
+
+// Confirmações que disparam a criação do pedido
+const CONFIRMACOES = new Set([
+  'sim', 'simm', 'sim!', 's', '1', 'confirmar', 'confirma', 'confirmo',
+  'pode confirmar', 'pode fechar', 'fechar', 'fechou', 'isso', 'isso mesmo',
+  'ta certo', 'tá certo', 'certo', 'correto', 'ok', 'okay', 'beleza', 'blz', 'pode ser',
+]);
+function ehConfirmacao(texto) {
+  const t = String(texto || '').trim().toLowerCase().replace(/[.!]+$/, '');
+  return CONFIRMACOES.has(t);
 }
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
@@ -48,12 +60,11 @@ app.get('/health', (_req, res) => {
 
 // ─── WEBHOOK ──────────────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  res.status(200).json({ ok: true }); // responde imediatamente
+  res.status(200).json({ ok: true });
 
   const requestId = uuid().slice(0, 8);
   const body = req.body;
 
-  // ── 1. Extrair mensagem ────────────────────────────────────────────────────
   let msg;
   try {
     msg = extrairMensagem(body);
@@ -63,7 +74,6 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // ── 2. Deduplicação ───────────────────────────────────────────────────────
   const msgId = body?.data?.key?.id;
   if (jaProcessada(msgId)) {
     logger.info('webhook/dedup', 'Mensagem duplicada ignorada', { requestId, msgId });
@@ -73,125 +83,125 @@ app.post('/webhook', async (req, res) => {
   const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
-  logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: conteudo.slice(0, 60) });
+  logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: (conteudo || '').slice(0, 60) });
 
   try {
-    // ── 3. Processar mídia ─────────────────────────────────────────────────
+    // ── Mídia: áudio ───────────────────────────────────────────────────────
     if (tipo === 'audioMessage') {
       logger.step(requestId, telefone, 'midia/audio');
-      // base64 já vem no webhook quando webhookBase64=true; só baixa se não vier
-      let midiaB64 = base64Inline;
-      let midiaMime = mimetypeInline || 'audio/ogg';
-      if (!midiaB64) {
-        const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
-        midiaB64  = midia.base64;
-        midiaMime = midia.mimetype || 'audio/ogg';
+      let b64 = base64Inline, mime = mimetypeInline || 'audio/ogg';
+      if (!b64) {
+        const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
+        b64 = m.base64; mime = m.mimetype || 'audio/ogg';
       }
-      const transcricao = await comRetry(() => transcreverAudio(midiaB64, midiaMime), { tentativas: 2, requestId, etapa: 'whisper' });
+      const transcricao = await comRetry(() => transcreverAudio(b64, mime), { tentativas: 2, requestId, etapa: 'whisper' });
       conteudo = `🎙️ [Áudio]: ${transcricao}`;
       logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
     }
 
+    // ── Mídia: imagem ──────────────────────────────────────────────────────
+    let isComprovante = false;
     if (tipo === 'imageMessage') {
       logger.step(requestId, telefone, 'midia/imagem');
-      let midiaB64 = base64Inline;
-      let midiaMime = mimetypeInline || 'image/jpeg';
-      if (!midiaB64) {
-        const midia = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
-        midiaB64  = midia.base64;
-        midiaMime = midia.mimetype || 'image/jpeg';
+      let b64 = base64Inline, mime = mimetypeInline || 'image/jpeg';
+      if (!b64) {
+        const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
+        b64 = m.base64; mime = m.mimetype || 'image/jpeg';
       }
-      const { analise, isComprovante } = await comRetry(() => analisarImagem(midiaB64, midiaMime), { tentativas: 2, requestId, etapa: 'gptVision' });
+      const r = await comRetry(() => analisarImagem(b64, mime), { tentativas: 2, requestId, etapa: 'gptVision' });
+      isComprovante = r.isComprovante;
       conteudo = isComprovante
-        ? `📎 COMPROVANTE PIX CONFIRMADO: ${analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
-        : `📎 [Imagem]: ${analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
+        ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
+        : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
       logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante });
     }
 
     if (!conteudo?.trim()) return;
 
-    // ── 4. Carregar estado ─────────────────────────────────────────────────
+    // ── Estado ──────────────────────────────────────────────────────────────
     const [historico, rascunho] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
       carregarRascunho(telefone),
     ]);
-
     logger.info('estado/ok', 'Estado carregado', {
-      requestId, telefone,
-      historico_msgs: historico.length,
-      etapa_rascunho: rascunho?.etapa_atual || 'sem rascunho',
+      requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
     });
 
-    // ── 5. Fluxo especial: confirmação via SIM ─────────────────────────────
-    const msgNorm = conteudo.trim().toUpperCase();
-    if ((msgNorm === 'SIM' || msgNorm === '1' || msgNorm === 'CONFIRMAR') &&
-        rascunho?.etapa_atual === 'aguardando_confirmacao' &&
-        rascunho?.itens && rascunho?.nome_cliente && rascunho?.tipo_entrega && rascunho?.forma_pagamento) {
-
-      logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
-      await enviarDigitando(telefone, 1500);
-
-      const resultado = await confirmarPedido(rascunho, telefone, requestId);
-
-      let respostaConfirmacao;
-      if (resultado.formaPagamento === 'pix') {
-        const info = await require('./services/supabase').buscarInfo();
-        const chave = info.chave_pix || 'não cadastrada';
-        respostaConfirmacao =
-          `✅ Pedido *#${resultado.numeroPedido}* registrado!\n\n` +
-          `💰 Total: R$ ${Number(resultado.total).toFixed(2).replace('.', ',')}\n` +
-          (resultado.taxaEntrega > 0 ? `🚴 Taxa de entrega: R$ ${Number(resultado.taxaEntrega).toFixed(2).replace('.', ',')}\n` : '') +
-          `\n📱 *Chave PIX:* \`${chave}\`\n\n` +
-          `Faz o pix e me manda o comprovante aqui, tá? 😊`;
-      } else {
-        const subtotalFmt = `R$ ${Number(resultado.subtotal).toFixed(2).replace('.', ',')}`;
-        const totalFmt    = `R$ ${Number(resultado.total).toFixed(2).replace('.', ',')}`;
-        const taxaFmt     = resultado.taxaEntrega > 0
-          ? `🚴 Taxa de entrega: R$ ${Number(resultado.taxaEntrega).toFixed(2).replace('.', ',')}\n`
-          : '';
-        respostaConfirmacao =
-          `✅ Pedido *#${resultado.numeroPedido}* confirmado!\n\n` +
-          `🛍️ Subtotal: ${subtotalFmt}\n` +
-          taxaFmt +
-          `💰 *Total: ${totalFmt}*\n\n` +
-          `Já tá indo pra cozinha! ⏱️ Previsão: ${rascunho.tipo_entrega === 'delivery' ? '~35 minutinhos' : '~20 minutinhos'}. Bom apetite! 🎩`;
+    // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
+    if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
+      logger.step(requestId, telefone, 'pix/comprovante-recebido');
+      await enviarDigitando(telefone, 1200);
+      try {
+        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
+          { tentativas: 3, requestId, etapa: 'statusPreparo' });
+        await limparRascunho(telefone);
+        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
+        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
+        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        return;
+      } catch (err) {
+        logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
+        // cai para o agente lidar
       }
-
-      await comRetry(() => enviarTexto(telefone, respostaConfirmacao), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
-      await Promise.all([
-        salvarMensagem(telefone, 'user', conteudo),
-        salvarMensagem(telefone, 'assistant', respostaConfirmacao),
-      ]);
-      return; // encerra aqui — não vai para o agente
     }
 
-    // ── 6. Processar com agente ────────────────────────────────────────────
-    await enviarDigitando(telefone, 2500);
+    // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
+    if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
+      logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
+      await enviarDigitando(telefone, 1500);
+      try {
+        const r = await confirmarPedido(rascunho, telefone, requestId);
 
+        let txt;
+        const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
+        const corpo =
+          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
+
+        if (r.formaPagamento === 'pix') {
+          const info = await buscarInfo();
+          const chave = info.chave_pix || 'não cadastrada';
+          txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
+            `📱 *Chave PIX:* \`${chave}\`\n\n` +
+            `Faz o PIX e me manda o comprovante aqui que eu já libero pra cozinha 😊`;
+        } else {
+          const prazo = rascunho.tipo_entrega === 'delivery' ? '~35 minutinhos' : '~20 minutinhos';
+          txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
+            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🎩`;
+        }
+
+        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
+        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        return;
+      } catch (err) {
+        logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
+        const falta = err.faltando?.length
+          ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
+          : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
+        await enviarTexto(telefone, `Opa! ${falta}`);
+        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', falta)]);
+        return;
+      }
+    }
+
+    // ── FLUXO 3: agente conversacional ───────────────────────────────────────
+    await enviarDigitando(telefone, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
     const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
 
     if (!resposta) {
       logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
+      await enviarTexto(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?');
       return;
     }
 
-    // ── 7. Enviar resposta ─────────────────────────────────────────────────
     await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
     logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
 
-    // ── 8. Salvar histórico ────────────────────────────────────────────────
-    await Promise.all([
-      salvarMensagem(telefone, 'user', conteudo),
-      salvarMensagem(telefone, 'assistant', resposta),
-    ]);
+    await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
-
-    try {
-      await enviarTexto(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!');
-    } catch { /* silencioso */ }
+    try { await enviarTexto(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
   }
 });
 
@@ -200,8 +210,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info('servidor/start', `🎩 Agente Chapelão rodando na porta ${PORT}`, {
     port: PORT,
-    supa_url:   process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
-    openai:     process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
-    evolution:  process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
+    supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
+    openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
+    evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
   });
 });
