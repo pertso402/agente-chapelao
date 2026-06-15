@@ -131,10 +131,16 @@ app.post('/webhook', async (req, res) => {
           `\n📱 *Chave PIX:* \`${chave}\`\n\n` +
           `Faz o pix e me manda o comprovante aqui, tá? 😊`;
       } else {
+        const subtotalFmt = `R$ ${Number(resultado.subtotal).toFixed(2).replace('.', ',')}`;
+        const totalFmt    = `R$ ${Number(resultado.total).toFixed(2).replace('.', ',')}`;
+        const taxaFmt     = resultado.taxaEntrega > 0
+          ? `🚴 Taxa de entrega: R$ ${Number(resultado.taxaEntrega).toFixed(2).replace('.', ',')}\n`
+          : '';
         respostaConfirmacao =
           `✅ Pedido *#${resultado.numeroPedido}* confirmado!\n\n` +
-          `💰 Total: R$ ${Number(resultado.total).toFixed(2).replace('.', ',')}\n` +
-          (resultado.taxaEntrega > 0 ? `🚴 Taxa de entrega: R$ ${Number(resultado.taxaEntrega).toFixed(2).replace('.', ',')}\n\n` : '\n') +
+          `🛍️ Subtotal: ${subtotalFmt}\n` +
+          taxaFmt +
+          `💰 *Total: ${totalFmt}*\n\n` +
           `Já tá indo pra cozinha! ⏱️ Previsão: ${rascunho.tipo_entrega === 'delivery' ? '~35 minutinhos' : '~20 minutinhos'}. Bom apetite! 🎩`;
       }
 

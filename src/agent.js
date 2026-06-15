@@ -63,9 +63,16 @@ function buildSystemPrompt(rascunho) {
 [lista de itens com qtd e valor]
 📍 [Entrega/Retirada]: [endereço ou "no local"]
 💳 Pagamento: [forma]
-💰 Total: R$ X,XX [+ taxa de entrega se houver]
+🛍️ Subtotal: R$ X,XX
+🚴 Taxa de entrega: R$ 5,00 ← incluir SOMENTE se for delivery. Se retirada, omitir esta linha.
+💰 *Total: R$ X,XX* ← subtotal + taxa de entrega (nunca dizer "frete incluso")
 
-_Responda *SIM* para confirmar ou me diga se quer alterar algo._`;
+_Responda *SIM* para confirmar ou me diga se quer alterar algo._
+
+## REGRA DE FRETE
+- Delivery: taxa de R$ 5,00 (GRÁTIS se subtotal ≥ R$ 50,00)
+- Retirada no local: sem taxa
+- NUNCA escreva "frete incluso" — sempre mostre subtotal e total separados quando houver taxa`;
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
