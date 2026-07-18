@@ -79,7 +79,7 @@ async function enviarTexto(telefone, texto) {
   });
 }
 
-async function enviarDigitando(telefone, duracaoMs = 2000) {
+async function enviarDigitando(telefone, duracaoMs = 4000) {
   try {
     await cliente().post(`/message/sendPresence/${INSTANCE()}`, {
       number: telefone,
@@ -91,4 +91,16 @@ async function enviarDigitando(telefone, duracaoMs = 2000) {
   }
 }
 
-module.exports = { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando };
+// "Digitando..." que dura o tempo REAL do processamento, não um tempo fixo
+// chutado. Antes, um único envio com delay=2500 apagava sozinho depois de
+// 2,5s — como o GPT-4o + Whisper/Vision costumam levar mais que isso, o
+// cliente via o "digitando" sumir e nada acontecer por vários segundos
+// (parecia que não tinha indicador nenhum). Agora reenvia a presença a
+// cada poucos segundos até o processamento terminar de verdade.
+function manterDigitando(telefone) {
+  enviarDigitando(telefone, 6000);
+  const intervalo = setInterval(() => enviarDigitando(telefone, 6000), 4000);
+  return () => clearInterval(intervalo);
+}
+
+module.exports = { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando, manterDigitando };

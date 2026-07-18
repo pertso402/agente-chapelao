@@ -5,7 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const logger = require('./logger');
-const { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando } = require('./services/evolution');
+const { extrairMensagem, downloadMidia, enviarTexto, manterDigitando } = require('./services/evolution');
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
@@ -146,7 +146,7 @@ app.post('/webhook', async (req, res) => {
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
-      await enviarDigitando(telefone, 1200);
+      const pararDigitando = manterDigitando(telefone);
       try {
         const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
@@ -158,13 +158,15 @@ app.post('/webhook', async (req, res) => {
       } catch (err) {
         logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
         // cai para o agente lidar
+      } finally {
+        pararDigitando();
       }
     }
 
     // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
-      await enviarDigitando(telefone, 1500);
+      const pararDigitando = manterDigitando(telefone);
       try {
         const r = await confirmarPedido(rascunho, telefone, requestId);
 
@@ -203,24 +205,30 @@ app.post('/webhook', async (req, res) => {
         await enviarTexto(telefone, `Opa! ${falta}`);
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', falta)]);
         return;
+      } finally {
+        pararDigitando();
       }
     }
 
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
-    await enviarDigitando(telefone, 2500);
-    const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-    const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
+    const pararDigitandoAgente = manterDigitando(telefone);
+    try {
+      const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
+      const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
 
-    if (!resposta) {
-      logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
-      await enviarTexto(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?');
-      return;
+      if (!resposta) {
+        logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
+        await enviarTexto(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?');
+        return;
+      }
+
+      await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
+      logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
+
+      await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
+    } finally {
+      pararDigitandoAgente();
     }
-
-    await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
-    logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
-
-    await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
