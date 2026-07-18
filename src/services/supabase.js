@@ -153,16 +153,53 @@ async function validarItens(itensInput) {
   return { itens, naoEncontrados };
 }
 
-async function buscarMistura() {
-  const { data, error } = await sb
-    .from('misturas_do_dia')
-    .select('titulo, descricao')
-    .eq('ativo', true)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) throw new Error(`Supabase/buscarMistura: ${error.message}`);
-  return data || null;
+// Itens do dia (carnes/base/acompanhamentos) — a MESMA fonte que o ERP usa na
+// tela de Porcionamento ("Itens do dia"). Se hoje ainda não foi configurado,
+// cai pro último dia configurado (mesma regra de fallback do ERP), pra nunca
+// informar o cardápio errado nem ficar sem resposta.
+async function buscarItensDoDia() {
+  const hoje = new Date().toISOString().slice(0, 10);
+
+  let { data: rows, error } = await sb
+    .from('itens_do_dia')
+    .select('inventory_item_id, ativo')
+    .eq('data', hoje);
+  if (error) throw new Error(`Supabase/buscarItensDoDia(hoje): ${error.message}`);
+
+  if (!rows || !rows.length) {
+    const { data: ultimaData, error: eData } = await sb
+      .from('itens_do_dia')
+      .select('data')
+      .lt('data', hoje)
+      .order('data', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (eData) throw new Error(`Supabase/buscarItensDoDia(ultimaData): ${eData.message}`);
+
+    if (ultimaData) {
+      const r2 = await sb.from('itens_do_dia').select('inventory_item_id, ativo').eq('data', ultimaData.data);
+      if (r2.error) throw new Error(`Supabase/buscarItensDoDia(fallback): ${r2.error.message}`);
+      rows = r2.data;
+    }
+  }
+
+  const ativos = (rows || []).filter(r => r.ativo).map(r => r.inventory_item_id);
+  if (!ativos.length) return null;
+
+  const { data: itens, error: eItens } = await sb
+    .from('inventory_items')
+    .select('nome, porc_categoria')
+    .in('id', ativos)
+    .eq('porc_ativo', true)
+    .eq('ativo', true);
+  if (eItens) throw new Error(`Supabase/buscarItensDoDia(itens): ${eItens.message}`);
+  if (!itens || !itens.length) return null;
+
+  const porCategoria = { carne: [], base: [], acompanhamento: [] };
+  for (const i of itens) {
+    if (porCategoria[i.porc_categoria]) porCategoria[i.porc_categoria].push(i.nome.trim());
+  }
+  return porCategoria;
 }
 
 async function buscarInfo() {
@@ -295,6 +332,6 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
-  buscarProdutos, validarItens, buscarMistura, buscarInfo, getTaxaEntrega,
+  buscarProdutos, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
 };

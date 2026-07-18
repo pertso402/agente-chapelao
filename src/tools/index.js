@@ -24,8 +24,8 @@ const TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'buscar_mistura_do_dia',
-      description: 'Retorna a mistura/acompanhamentos da marmitex de hoje. Use sempre que falar de marmitex.',
+      name: 'buscar_itens_do_dia',
+      description: 'Retorna as carnes, base e acompanhamentos disponíveis HOJE na marmitex — a mesma configuração que a cozinha usa no ERP (Porcionamento → Itens do dia). Use sempre que falar de marmitex.',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -115,10 +115,17 @@ async function executarTool(nome, args, contexto = {}) {
       return txt.trim();
     }
 
-    case 'buscar_mistura_do_dia': {
-      const m = await db.buscarMistura();
-      if (!m) return 'Hoje não há mistura especial cadastrada. Ofereça a marmitex normal.';
-      return `🌶️ MISTURA DE HOJE\n\n${m.titulo}\n${m.descricao || ''}`;
+    case 'buscar_itens_do_dia': {
+      const itens = await db.buscarItensDoDia();
+      if (!itens) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia e ofereça o restante do cardápio (buscar_cardapio).';
+
+      const linhas = [];
+      if (itens.carne.length) linhas.push(`Carnes: ${itens.carne.join(', ')}`);
+      if (itens.base.length) linhas.push(`Base: ${itens.base.join(', ')}`);
+      if (itens.acompanhamento.length) linhas.push(`Acompanhamentos: ${itens.acompanhamento.join(', ')}`);
+      if (!linhas.length) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia.';
+
+      return `🌶️ MARMITEX DE HOJE\n\n${linhas.join('\n')}`;
     }
 
     case 'info_restaurante': {
