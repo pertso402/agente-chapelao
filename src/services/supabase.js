@@ -3,6 +3,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 const { normalizar, parseItens, avaliarRascunho, calcularSubtotal } = require('../utils/pedido');
+const logger = require('../logger');
 
 const sb = createClient(
   process.env.SUPA_URL,
@@ -101,12 +102,28 @@ async function limparRascunho(telefone) {
   await sb.from('pedido_rascunho').delete().eq('telefone', telefone);
 }
 
+// Trava atômica pra confirmação: só UMA chamada concorrente consegue passar
+// etapa_atual de 'aguardando_confirmacao' pra 'processando' (o UPDATE...WHERE
+// é atômico no Postgres). Duas mensagens "sim" quase simultâneas (double-tap,
+// retry do WhatsApp) não criam dois pedidos — a segunda simplesmente perde
+// a corrida e recebe travou=false.
+async function tentarIniciarConfirmacao(telefone) {
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ etapa_atual: 'processando', updated_at: new Date().toISOString() })
+    .eq('telefone', telefone)
+    .eq('etapa_atual', 'aguardando_confirmacao')
+    .select('telefone');
+  if (error) throw new Error(`Supabase/tentarIniciarConfirmacao: ${error.message}`);
+  return (data || []).length > 0;
+}
+
 // ─── PRODUTOS / CARDÁPIO ──────────────────────────────────────────────────────
 
 async function buscarProdutos() {
   const { data, error } = await sb
     .from('produtos')
-    .select('id, nome, categoria, preco, preco_promocional, descricao, disponivel')
+    .select('id, nome, categoria, preco, preco_promocional, preco_delivery, descricao, disponivel')
     .eq('disponivel', true)
     .order('categoria')
     .order('nome');
@@ -114,8 +131,13 @@ async function buscarProdutos() {
   return data || [];
 }
 
+// Todo pedido feito por este agente é delivery/retirada (nunca balcão), então
+// preco_delivery (quando configurado) tem prioridade sobre o preço de balcão.
+// Promocional continua valendo em qualquer canal.
 function precoFinal(p) {
-  return p.preco_promocional != null ? Number(p.preco_promocional) : Number(p.preco);
+  if (p.preco_promocional != null) return Number(p.preco_promocional);
+  if (p.preco_delivery != null) return Number(p.preco_delivery);
+  return Number(p.preco);
 }
 
 // Valida itens contra o catálogo: preço real, nome canônico, produto_id.
@@ -299,9 +321,23 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     total: parseFloat((Number(i.preco_unitario) * Number(i.quantidade)).toFixed(2)),
   }));
   const { error: iErr } = await sb.from('itens_pedido').insert(rows);
-  if (iErr) throw new Error(`Supabase/criarItens: ${iErr.message}`);
+  if (iErr) {
+    // Compensa: sem isto, um pedido "cabeçalho" sem nenhum item ficava
+    // órfão no banco (aparecia no ERP com total mas 0 itens), e a nova
+    // tentativa do cliente criaria outro pedido do zero por cima.
+    await sb.from('pedidos').delete().eq('id', pedido.id).then(() => {}, () => {});
+    throw new Error(`Supabase/criarItens: ${iErr.message}`);
+  }
 
-  await atualizarStatsCliente(cliente, total);
+  try {
+    await atualizarStatsCliente(cliente, total);
+  } catch (e) {
+    // Pedido e itens já estão gravados e são válidos — uma falha só nas
+    // estatísticas do cliente não pode fazer o fluxo cair no catch de
+    // "pedido falhou" e o cliente tentar de novo (o que criaria um
+    // pedido de verdade duplicado). Só loga.
+    logger.warn('pedido/stats-cliente-falhou', e.message, { clienteId: cliente.id, numeroPedido: pedido.numero_pedido });
+  }
 
   return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, formaPagamento };
 }
@@ -332,6 +368,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
-  buscarProdutos, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
+  tentarIniciarConfirmacao,
+  buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
 };

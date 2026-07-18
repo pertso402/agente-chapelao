@@ -105,7 +105,7 @@ async function executarTool(nome, args, contexto = {}) {
       for (const cat of ordenadas) {
         txt += `${cat.toUpperCase()}\n`;
         for (const p of cats[cat]) {
-          const preco = p.preco_promocional != null ? p.preco_promocional : p.preco;
+          const preco = db.precoFinal(p);
           txt += `• ${p.nome.trim()} — R$ ${Number(preco).toFixed(2).replace('.', ',')}`;
           if (p.descricao) txt += ` (${p.descricao})`;
           txt += '\n';

@@ -2,7 +2,7 @@
 
 const OpenAI = require('openai');
 const { TOOLS, executarTool } = require('./tools');
-const { salvarRascunho, limparRascunho, criarPedidoCompleto } = require('./services/supabase');
+const { salvarRascunho, limparRascunho, criarPedidoCompleto, tentarIniciarConfirmacao } = require('./services/supabase');
 const { avaliarRascunho, descreverFaltando, parseItens } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
 const logger = require('./logger');
@@ -167,7 +167,9 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 }
 
 // ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente, no código) ──────────────
-// Cria o pedido diretamente. Trava anti-duplicação: vira a etapa ANTES de criar.
+// Cria o pedido diretamente. Trava anti-duplicação ATÔMICA: o UPDATE...WHERE
+// só deixa UMA chamada concorrente passar de aguardando_confirmacao pra
+// processando (duas mensagens "sim" quase simultâneas não criam 2 pedidos).
 
 async function confirmarPedido(rascunho, telefone, requestId) {
   // Revalidação defensiva — só confirma se realmente está completo
@@ -178,8 +180,12 @@ async function confirmarPedido(rascunho, telefone, requestId) {
     throw erro;
   }
 
-  // Trava: marca como "processando" para que um SIM duplicado não reentre
-  await salvarRascunho(telefone, { etapa_atual: 'processando' });
+  const travou = await tentarIniciarConfirmacao(telefone);
+  if (!travou) {
+    const erro = new Error('Confirmação já em processamento por outra mensagem concorrente.');
+    erro.jaProcessando = true;
+    throw erro;
+  }
 
   let resultado;
   try {

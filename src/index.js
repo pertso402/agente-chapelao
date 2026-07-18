@@ -14,6 +14,7 @@ const {
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
+const { normalizar } = require('./utils/pedido');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -33,15 +34,30 @@ function jaProcessada(msgId) {
   return false;
 }
 
-// Confirmações que disparam a criação do pedido
-const CONFIRMACOES = new Set([
-  'sim', 'simm', 'sim!', 's', '1', 'confirmar', 'confirma', 'confirmo',
+// Confirmações que disparam a criação do pedido.
+// Antes isto exigia IGUALDADE EXATA com a frase — "sim, pode confirmar" ou
+// "isso mesmo, obrigado" (frases naturais e comuns) NUNCA batiam, deixando
+// o pedido travado em aguardando_confirmacao pra sempre (o cliente achava
+// que tinha confirmado, mas nada acontecia). Agora aceita a palavra
+// afirmativa como INÍCIO da frase, e rejeita explicitamente frases com
+// ressalva (deixando "sim, mas troca o refrigerante" cair pro agente).
+const CONFIRMACOES_EXATAS = new Set([
+  'sim', 'simm', 's', '1', 'confirmar', 'confirma', 'confirmo',
   'pode confirmar', 'pode fechar', 'fechar', 'fechou', 'isso', 'isso mesmo',
-  'ta certo', 'tá certo', 'certo', 'correto', 'ok', 'okay', 'beleza', 'blz', 'pode ser',
+  'ta certo', 'certo', 'correto', 'ok', 'okay', 'beleza', 'blz', 'pode ser',
 ]);
+const CONFIRMACOES_PREFIXO = [
+  'sim', 'confirmo', 'confirma', 'pode confirmar', 'pode fechar', 'fechar',
+  'fechou', 'isso mesmo', 'isso', 'ta certo', 'certo', 'correto', 'beleza', 'pode ser',
+];
+const RESSALVA = /\b(mas|so que|so quero|quero mudar|muda|troca|corrige|corrigir|errado|espera|pera|calma|antes|na verdade|ainda nao|primeiro)\b/;
+
 function ehConfirmacao(texto) {
-  const t = String(texto || '').trim().toLowerCase().replace(/[.!]+$/, '');
-  return CONFIRMACOES.has(t);
+  const t = normalizar(String(texto || '')).replace(/[.!,]+$/, '');
+  if (!t) return false;
+  if (RESSALVA.test(t)) return false;
+  if (CONFIRMACOES_EXATAS.has(t)) return true;
+  return CONFIRMACOES_PREFIXO.some((p) => t.startsWith(`${p} `) || t.startsWith(`${p},`));
 }
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
@@ -173,6 +189,13 @@ app.post('/webhook', async (req, res) => {
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
         return;
       } catch (err) {
+        if (err.jaProcessando) {
+          // Outra mensagem quase simultânea (double-tap, retry do WhatsApp)
+          // já está fechando este pedido — essa aqui só desiste em silêncio,
+          // a outra já vai mandar a confirmação real pro cliente.
+          logger.info('pedido/confirmar/concorrente', 'Confirmação duplicada ignorada', { requestId, telefone });
+          return;
+        }
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
         const falta = err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
