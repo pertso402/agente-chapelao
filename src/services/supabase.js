@@ -281,9 +281,58 @@ async function atualizarStatsCliente(cliente, totalPedido) {
   if (error) throw new Error(`Supabase/atualizarStats: ${error.message}`);
 }
 
+// ─── CUPONS / OFERTAS DE RECOMPRA ─────────────────────────────────────────────
+// O agente de recompra (projeto separado) manda ofertas com cupom pelo
+// WhatsApp e grava em `cupons` + `ofertas_enviadas`. Este agente de
+// atendimento só LÊ essas tabelas pra saber se o cliente que está falando
+// agora tem uma oferta ativa — nunca cria oferta, só consome.
+
+// Retorna o cupom ativo (não usado, dentro da validade) mais recente do
+// cliente, ou null se não houver nenhum. Isso é o que dá ao agente de
+// atendimento o "contexto" de que uma oferta foi enviada.
+async function buscarCupomAtivoPorTelefone(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+
+  const { data: cliente } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
+  if (!cliente) return null;
+
+  const hoje = new Date().toISOString().slice(0, 10);
+  const { data: cupom, error } = await sb
+    .from('cupons')
+    .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id')
+    .eq('cliente_id', cliente.id)
+    .eq('usado', false)
+    .gte('valido_ate', hoje)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`Supabase/buscarCupomAtivo: ${error.message}`);
+
+  return cupom || null;
+}
+
+// Dá baixa no cupom (nunca mais reutilizável) e marca a oferta como
+// convertida. Best-effort: chamado DEPOIS que o pedido já foi criado com
+// sucesso — se isso falhar, o pedido continua válido, só loga o problema
+// (mesmo padrão de atualizarStatsCliente abaixo).
+async function darBaixaCupom(cupomId, pedidoId) {
+  const { error: errCupom } = await sb
+    .from('cupons')
+    .update({ usado: true, pedido_id: pedidoId })
+    .eq('id', cupomId)
+    .eq('usado', false); // condição evita dar baixa duas vezes numa corrida
+  if (errCupom) throw new Error(`Supabase/darBaixaCupom: ${errCupom.message}`);
+
+  const { error: errOferta } = await sb
+    .from('ofertas_enviadas')
+    .update({ converteu: true, pedido_convertido_id: pedidoId })
+    .eq('cupom_id', cupomId);
+  if (errOferta) throw new Error(`Supabase/marcarOfertaConvertida: ${errOferta.message}`);
+}
+
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom }) {
   const tel = String(telefone).replace(/\D/g, '');
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
@@ -291,7 +340,8 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const subtotal = calcularSubtotal(listaItens);
   const taxaConfig = await getTaxaEntrega();
   const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
-  const total = parseFloat((subtotal + taxaEntrega).toFixed(2));
+  const desconto = cupom ? parseFloat((subtotal * (Number(cupom.desconto_percentual) / 100)).toFixed(2)) : 0;
+  const total = parseFloat((subtotal + taxaEntrega - desconto).toFixed(2));
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
 
@@ -305,6 +355,8 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       forma_pagamento: formaPagamento,
       subtotal,
       taxa_entrega: taxaEntrega,
+      desconto,
+      cupom_id: cupom ? cupom.id : null,
       total,
       observacao: null,
     })
@@ -339,7 +391,18 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     logger.warn('pedido/stats-cliente-falhou', e.message, { clienteId: cliente.id, numeroPedido: pedido.numero_pedido });
   }
 
-  return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, formaPagamento };
+  if (cupom) {
+    try {
+      await darBaixaCupom(cupom.id, pedido.id);
+    } catch (e) {
+      // Mesmo raciocínio: o pedido já é válido e não deve ser desfeito por
+      // uma falha na baixa do cupom. Só loga — mas isso merece alerta,
+      // porque um cupom não baixado pode ser reaproveitado depois.
+      logger.error('pedido/baixa-cupom-falhou', e.message, { cupomId: cupom.id, numeroPedido: pedido.numero_pedido });
+    }
+  }
+
+  return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, desconto, cupomAplicado: cupom ? cupom.codigo : null, formaPagamento };
 }
 
 async function atualizarStatusPedido(telefone, novoStatus) {
@@ -371,4 +434,5 @@ module.exports = {
   tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
+  buscarCupomAtivoPorTelefone, darBaixaCupom,
 };

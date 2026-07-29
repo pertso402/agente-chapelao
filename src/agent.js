@@ -17,7 +17,7 @@ const MAX_ITER = 8;
 
 // ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(rascunho) {
+function buildSystemPrompt(rascunho, ofertaAtiva) {
   let estado = '';
   if (rascunho) {
     const av = avaliarRascunho(rascunho);
@@ -38,12 +38,22 @@ function buildSystemPrompt(rascunho) {
     }
   }
 
+  let ofertaTexto = '';
+  if (ofertaAtiva) {
+    ofertaTexto = `\n\n## 🎁 OFERTA DE RECOMPRA ATIVA PRA ESTE CLIENTE
+Este cliente recebeu uma mensagem de recompra com o cupom *${ofertaAtiva.codigo}* (${ofertaAtiva.desconto_percentual}% de desconto, válido até ${ofertaAtiva.valido_ate}).
+- O SISTEMA já sabe desse cupom e vai aplicar o desconto AUTOMATICAMENTE no fechamento do pedido — você NÃO precisa perguntar se ele quer usar, nem pedir o código, nem confirmar isso com o cliente.
+- Se ele topar pedir (disser "quero", "bora", "vou querer", mencionar a oferta, etc.), conduza o pedido normalmente pelo fluxo de sempre.
+- Pode mencionar de forma natural e leve que o desconto já tá garantido, sem parecer script de vendas repetitivo.
+- NUNCA invente um valor de desconto diferente do informado aqui.`;
+  }
+
   return `Você é "Chapinha" 🎩, o atendente virtual do Restaurante Chapelão — uma marmitaria de comida caseira de verdade em Umuarama-PR.
 
 ## PERSONALIDADE
 - Caloroso, simpático, ágil e objetivo. Português brasileiro natural, com leveza e bom humor.
 - Emojis com moderação. Trate o cliente pelo nome quando souber.
-- Mensagens curtas e claras (é WhatsApp). Conduza a conversa — não deixe o cliente perdido.${estado}
+- Mensagens curtas e claras (é WhatsApp). Conduza a conversa — não deixe o cliente perdido.${estado}${ofertaTexto}
 
 ## SEU OBJETIVO
 Conduzir o cliente do "oi" até o pedido confirmado, SEM falhar nenhuma etapa. Você coleta e organiza; o SISTEMA fecha o pedido.
@@ -82,7 +92,7 @@ _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
-async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone) {
+async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, ofertaAtiva) {
   const openai = getClient();
 
   const messages = [
@@ -90,7 +100,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     { role: 'user', content: mensagemUsuario },
   ];
 
-  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho) };
+  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho, ofertaAtiva) };
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL,
@@ -171,7 +181,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 // só deixa UMA chamada concorrente passar de aguardando_confirmacao pra
 // processando (duas mensagens "sim" quase simultâneas não criam 2 pedidos).
 
-async function confirmarPedido(rascunho, telefone, requestId) {
+async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
   // Revalidação defensiva — só confirma se realmente está completo
   const av = avaliarRascunho(rascunho);
   if (!av.completo) {
@@ -197,6 +207,7 @@ async function confirmarPedido(rascunho, telefone, requestId) {
         endereco:       rascunho.endereco,
         formaPagamento: rascunho.forma_pagamento,
         itens:          rascunho.itens,
+        cupom:          ofertaAtiva || null,
       }),
       { tentativas: 2, requestId, etapa: 'confirmarPedido' }
     );
@@ -219,6 +230,8 @@ async function confirmarPedido(rascunho, telefone, requestId) {
     numero_pedido: resultado.numeroPedido,
     total: resultado.total,
     forma: resultado.formaPagamento,
+    cupom_aplicado: resultado.cupomAplicado || null,
+    desconto: resultado.desconto || 0,
   });
 
   return resultado;

@@ -11,6 +11,7 @@ const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, limparRascunho,
   buscarInfo, atualizarStatusPedido,
+  buscarCupomAtivoPorTelefone,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
@@ -135,12 +136,19 @@ app.post('/webhook', async (req, res) => {
     if (!conteudo?.trim()) return;
 
     // ── Estado ──────────────────────────────────────────────────────────────
-    const [historico, rascunho] = await Promise.all([
+    const [historico, rascunho, ofertaAtiva] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
       carregarRascunho(telefone),
+      buscarCupomAtivoPorTelefone(telefone).catch((e) => {
+        // Nunca deixa uma falha aqui derrubar o atendimento — sem oferta
+        // ativa detectada, o fluxo normal (sem desconto) continua valendo.
+        logger.warn('oferta/buscar-falhou', e.message, { requestId, telefone });
+        return null;
+      }),
     ]);
     logger.info('estado/ok', 'Estado carregado', {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
+      cupom_ativo: ofertaAtiva?.codigo || null,
     });
 
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
@@ -168,12 +176,13 @@ app.post('/webhook', async (req, res) => {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
       const pararDigitando = manterDigitando(telefone);
       try {
-        const r = await confirmarPedido(rascunho, telefone, requestId);
+        const r = await confirmarPedido(rascunho, telefone, requestId, ofertaAtiva);
 
         let txt;
         const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
+        const linhaDesconto = r.desconto > 0 ? `🎁 Desconto (${r.cupomAplicado}): -${fmt(r.desconto)}\n` : '';
         const corpo =
-          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
+          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + linhaDesconto + `💰 *Total: ${fmt(r.total)}*\n\n`;
 
         if (r.formaPagamento === 'pix') {
           const info = await buscarInfo();
@@ -214,7 +223,7 @@ app.post('/webhook', async (req, res) => {
     const pararDigitandoAgente = manterDigitando(telefone);
     try {
       const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-      const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
+      const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
 
       if (!resposta) {
         logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
