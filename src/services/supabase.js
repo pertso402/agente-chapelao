@@ -85,6 +85,14 @@ async function atualizarRascunho(telefone, campos) {
     naoEncontrados = nf;
   }
 
+  // Brinde passa pela MESMA validação de catálogo: assim a LLM não consegue
+  // inventar um item de cortesia que não existe no cardápio.
+  if (campos.itens_brinde !== undefined) {
+    const { itens: brindes, naoEncontrados: nfb } = await validarItens(campos.itens_brinde);
+    merge.itens_brinde = JSON.stringify(brindes);
+    naoEncontrados = naoEncontrados.concat(nfb);
+  }
+
   // Estado consolidado (atual + novos campos) para avaliar
   const consolidado = { ...atual, ...merge };
   const avaliacao = avaliarRascunho(consolidado);
@@ -299,7 +307,7 @@ async function buscarCupomAtivoPorTelefone(telefone) {
   const hoje = new Date().toISOString().slice(0, 10);
   const { data: cupom, error } = await sb
     .from('cupons')
-    .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id')
+    .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id, tipo, descricao')
     .eq('cliente_id', cliente.id)
     .eq('usado', false)
     .gte('valido_ate', hoje)
@@ -332,15 +340,23 @@ async function darBaixaCupom(cupomId, pedidoId) {
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom, itensBrinde }) {
   const tel = String(telefone).replace(/\D/g, '');
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
 
+  // Brinde só existe se houver cupom de brinde ativo. Sem essa trava, bastaria
+  // a LLM preencher itens_brinde por conta própria pra dar comida de graça.
+  const cupomEhBrinde = cupom?.tipo === 'brinde';
+  const listaBrinde = cupomEhBrinde ? parseItens(itensBrinde) : [];
+
   const subtotal = calcularSubtotal(listaItens);
   const taxaConfig = await getTaxaEntrega();
   const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
-  const desconto = cupom ? parseFloat((subtotal * (Number(cupom.desconto_percentual) / 100)).toFixed(2)) : 0;
+  // Cupom de brinde não abate percentual — o benefício são os itens grátis.
+  const desconto = cupom && !cupomEhBrinde
+    ? parseFloat((subtotal * (Number(cupom.desconto_percentual) / 100)).toFixed(2))
+    : 0;
   const total = parseFloat((subtotal + taxaEntrega - desconto).toFixed(2));
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
@@ -372,6 +388,20 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     preco_unitario: Number(i.preco_unitario),
     total: parseFloat((Number(i.preco_unitario) * Number(i.quantidade)).toFixed(2)),
   }));
+
+  // Itens de cortesia entram no pedido zerados, pra cozinha ver que tem que
+  // incluir e o ERP conseguir medir quanto a campanha custou em brinde.
+  for (const b of listaBrinde) {
+    rows.push({
+      pedido_id: pedido.id,
+      produto_id: b.produto_id || null,
+      nome_produto: `${b.nome} (brinde)`,
+      quantidade: Number(b.quantidade) || 1,
+      preco_unitario: 0,
+      total: 0,
+    });
+  }
+
   const { error: iErr } = await sb.from('itens_pedido').insert(rows);
   if (iErr) {
     // Compensa: sem isto, um pedido "cabeçalho" sem nenhum item ficava
@@ -402,7 +432,13 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     }
   }
 
-  return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, desconto, cupomAplicado: cupom ? cupom.codigo : null, formaPagamento };
+  return {
+    numeroPedido: pedido.numero_pedido,
+    total, subtotal, taxaEntrega, desconto,
+    cupomAplicado: cupom ? cupom.codigo : null,
+    brindes: listaBrinde.map(b => `${b.quantidade || 1}x ${b.nome}`),
+    formaPagamento,
+  };
 }
 
 async function atualizarStatusPedido(telefone, novoStatus) {

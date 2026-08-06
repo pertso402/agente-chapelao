@@ -58,6 +58,18 @@ const TOOLS = [
               required: ['nome', 'quantidade'],
             },
           },
+          itens_brinde:    {
+            type: 'array',
+            description: 'SÓ use quando o cliente tiver cupom de BRINDE ativo (informado no contexto). São os itens de cortesia que ele escolheu. Use os NOMES EXATOS do cardápio. O sistema zera o preço automaticamente.',
+            items: {
+              type: 'object',
+              properties: {
+                nome:       { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
+                quantidade: { type: 'number' },
+              },
+              required: ['nome', 'quantidade'],
+            },
+          },
           tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
           endereco:        { type: 'string', description: 'Endereço completo (só se delivery)' },
           forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
@@ -147,6 +159,7 @@ async function executarTool(nome, args, contexto = {}) {
       const campos = {};
       if (args.nome_cliente)    campos.nome_cliente    = args.nome_cliente;
       if (args.itens)           campos.itens           = args.itens;
+      if (args.itens_brinde)    campos.itens_brinde    = args.itens_brinde;
       if (args.tipo_entrega)    campos.tipo_entrega    = args.tipo_entrega;
       if (args.endereco)        campos.endereco        = args.endereco;
       if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
@@ -160,9 +173,12 @@ async function executarTool(nome, args, contexto = {}) {
       const itens = parseItens(rascunho.itens);
       const subtotal = calcularSubtotal(itens);
 
+      const brindes = parseItens(rascunho.itens_brinde);
+
       const resumo = {
         salvo: true,
         itens: itens.map(i => `${i.quantidade}x ${i.nome} (R$ ${Number(i.preco_unitario).toFixed(2)})`),
+        brindes: brindes.length ? brindes.map(b => `${b.quantidade}x ${b.nome} (cortesia)`) : undefined,
         subtotal_itens: `R$ ${subtotal.toFixed(2)}`,
         nome: rascunho.nome_cliente || null,
         tipo_entrega: rascunho.tipo_entrega || null,

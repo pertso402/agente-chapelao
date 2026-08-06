@@ -39,7 +39,18 @@ function buildSystemPrompt(rascunho, ofertaAtiva) {
   }
 
   let ofertaTexto = '';
-  if (ofertaAtiva) {
+  if (ofertaAtiva && ofertaAtiva.tipo === 'brinde') {
+    ofertaTexto = `\n\n## 🎁 BRINDE DE PRIMEIRA COMPRA ATIVO PRA ESTE CLIENTE
+Este cliente recebeu uma oferta com o cupom *${ofertaAtiva.codigo}*, válido até ${ofertaAtiva.valido_ate}.
+O que ele ganhou: *${ofertaAtiva.descricao || 'brinde de primeira compra'}*.
+
+- Esse cupom NÃO é desconto em dinheiro. O benefício são os itens de cortesia acima. NUNCA fale em porcentagem de desconto pra ele.
+- Você PRECISA perguntar quais itens de cortesia ele quer (ex: qual refrigerante, qual sobremesa), usando os nomes do cardápio — chame buscar_cardapio se precisar.
+- Depois que ele escolher, chame salvar_dados_pedido com o campo *itens_brinde*. O sistema zera o preço desses itens sozinho.
+- Não dê brinde além do que está descrito acima, nem troque por desconto.
+- Se ele topar pedir ("quero", "bora", "vou querer"), conduza o pedido normalmente pelo fluxo de sempre.
+- Mencione a cortesia de forma leve e natural, sem parecer script de vendas.`;
+  } else if (ofertaAtiva) {
     ofertaTexto = `\n\n## 🎁 OFERTA DE RECOMPRA ATIVA PRA ESTE CLIENTE
 Este cliente recebeu uma mensagem de recompra com o cupom *${ofertaAtiva.codigo}* (${ofertaAtiva.desconto_percentual}% de desconto, válido até ${ofertaAtiva.valido_ate}).
 - O SISTEMA já sabe desse cupom e vai aplicar o desconto AUTOMATICAMENTE no fechamento do pedido — você NÃO precisa perguntar se ele quer usar, nem pedir o código, nem confirmar isso com o cliente.
@@ -207,6 +218,7 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
         endereco:       rascunho.endereco,
         formaPagamento: rascunho.forma_pagamento,
         itens:          rascunho.itens,
+        itensBrinde:    rascunho.itens_brinde,
         cupom:          ofertaAtiva || null,
       }),
       { tentativas: 2, requestId, etapa: 'confirmarPedido' }
@@ -218,8 +230,10 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
   }
 
   if (resultado.formaPagamento === 'pix') {
-    // Mantém o rascunho aguardando comprovante
-    await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix' });
+    // Mantém o rascunho aguardando comprovante, mas zera o brinde: o cupom já
+    // foi baixado neste pedido e um itens_brinde sobrando seria dado de novo
+    // caso o cliente emende outro pedido na mesma conversa.
+    await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix', itens_brinde: JSON.stringify([]) });
   } else {
     // Pedido fechado — limpa o rascunho para a próxima conversa começar zerada
     await limparRascunho(telefone);
