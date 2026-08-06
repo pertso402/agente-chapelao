@@ -88,6 +88,20 @@ function extrairMensagem(body) {
   } else if (messageType === 'documentMessage') {
     texto = '[Documento recebido]';
     tipo = 'text';
+  } else if (messageType === 'locationMessage' || messageType === 'liveLocationMessage') {
+    // Localização (fixa ou em tempo real): converte pra um link de mapa e trata
+    // como texto normal — o agente entende isso como o endereço do cliente,
+    // igual trataria um endereço digitado.
+    const loc = message[messageType] || {};
+    const lat = loc.degreesLatitude;
+    const lng = loc.degreesLongitude;
+    if (lat == null || lng == null) return null;
+    const link = `https://www.google.com/maps?q=${lat},${lng}`;
+    const nomeLocal = loc.name ? `${loc.name} — ` : '';
+    const enderecoLocal = loc.address ? `${loc.address} — ` : '';
+    texto = `📍 [Localização compartilhada]: ${nomeLocal}${enderecoLocal}${link}`;
+    // Mantém tipo = messageType (locationMessage/liveLocationMessage) — index.js
+    // usa isso pra filtrar pings repetidos de localização em tempo real.
   } else {
     return null; // tipo não suportado
   }

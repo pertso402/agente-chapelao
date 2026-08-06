@@ -113,17 +113,25 @@ async function executarTool(nome, args, contexto = {}) {
 
       const ordenadas = Object.keys(cats).sort((a, b) => prioridadeCategoria(a) - prioridadeCategoria(b));
 
-      let txt = '📋 CARDÁPIO CHAPELÃO\n\n';
+      // Formato WhatsApp: *negrito* pra categoria, SEM markdown de header (### não
+      // renderiza no WhatsApp, vira texto literal feio) e sem peso/gramagem na
+      // linha do preço — isso fica só na seção de detalhes internos abaixo.
+      let txt = '🍽️ *Cardápio Chapelão*\n\n';
       for (const cat of ordenadas) {
-        txt += `${cat.toUpperCase()}\n`;
+        txt += `*${cat}*\n`;
         for (const p of cats[cat]) {
           const preco = db.precoFinal(p);
-          txt += `• ${p.nome.trim()} — R$ ${Number(preco).toFixed(2).replace('.', ',')}`;
-          if (p.descricao) txt += ` (${p.descricao})`;
-          txt += '\n';
+          txt += `🔸 ${p.nome.trim()} — R$ ${Number(preco).toFixed(2).replace('.', ',')}\n`;
         }
         txt += '\n';
       }
+
+      const detalhes = produtos.filter(p => p.descricao);
+      if (detalhes.length) {
+        txt += '---\n[USO INTERNO — não repita isso pro cliente, é só pra você responder SE ele perguntar peso/detalhe de um item específico]\n';
+        txt += detalhes.map(p => `${p.nome.trim()}: ${p.descricao}`).join('\n');
+      }
+
       return txt.trim();
     }
 
@@ -131,13 +139,13 @@ async function executarTool(nome, args, contexto = {}) {
       const itens = await db.buscarItensDoDia();
       if (!itens) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia e ofereça o restante do cardápio (buscar_cardapio).';
 
-      const linhas = [];
-      if (itens.carne.length) linhas.push(`Carnes: ${itens.carne.join(', ')}`);
-      if (itens.base.length) linhas.push(`Base: ${itens.base.join(', ')}`);
-      if (itens.acompanhamento.length) linhas.push(`Acompanhamentos: ${itens.acompanhamento.join(', ')}`);
-      if (!linhas.length) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia.';
+      let txt = '🌶️ *Marmitex de Hoje*\n\n';
+      if (itens.carne.length) txt += `🥩 *Carnes:* ${itens.carne.join(', ')}\n`;
+      if (itens.base.length) txt += `🍚 *Base:* ${itens.base.join(', ')}\n`;
+      if (itens.acompanhamento.length) txt += `🥗 *Acompanhamentos:* ${itens.acompanhamento.join(', ')}\n`;
+      if (txt === '🌶️ *Marmitex de Hoje*\n\n') return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia.';
 
-      return `🌶️ MARMITEX DE HOJE\n\n${linhas.join('\n')}`;
+      return txt.trim();
     }
 
     case 'info_restaurante': {

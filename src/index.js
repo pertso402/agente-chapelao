@@ -70,6 +70,21 @@ function jaProcessada(msgId) {
   return false;
 }
 
+// Localização em tempo real manda vários "pings" periódicos enquanto o
+// compartilhamento fica ativo — sem isso, cada ping viraria uma nova rodada
+// completa do agente (custo de LLM + risco de responder repetido pro cliente).
+const ultimaLocalizacao = new Map(); // telefone -> timestamp
+const JANELA_LOCALIZACAO_MS = 5 * 60_000;
+function pingDeLocalizacaoRepetido(telefone) {
+  const agora = Date.now();
+  for (const [tel, ts] of ultimaLocalizacao) {
+    if (agora - ts > JANELA_LOCALIZACAO_MS) ultimaLocalizacao.delete(tel);
+  }
+  const ultima = ultimaLocalizacao.get(telefone);
+  ultimaLocalizacao.set(telefone, agora);
+  return !!ultima && (agora - ultima) < JANELA_LOCALIZACAO_MS;
+}
+
 // Confirmações que disparam a criação do pedido.
 // Antes isto exigia IGUALDADE EXATA com a frase — "sim, pode confirmar" ou
 // "isso mesmo, obrigado" (frases naturais e comuns) NUNCA batiam, deixando
@@ -188,6 +203,15 @@ async function processarMensagem(msg, requestId) {
         ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
         : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
       logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante });
+    }
+
+    // ── Localização (fixa ou em tempo real) ──────────────────────────────────
+    if (tipo === 'locationMessage' || tipo === 'liveLocationMessage') {
+      if (pingDeLocalizacaoRepetido(telefone)) {
+        logger.info('midia/localizacao-ping-ignorado', 'Ping de localização em tempo real repetido, ignorado', { requestId, telefone });
+        return;
+      }
+      logger.step(requestId, telefone, 'midia/localizacao');
     }
 
     if (!conteudo?.trim()) return;
