@@ -5,15 +5,17 @@ require('dotenv').config();
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const logger = require('./logger');
-const { extrairMensagem, downloadMidia, enviarTexto, manterDigitando } = require('./services/evolution');
+const { extrairMensagem, downloadMidia, enviarTexto, manterDigitando, ehEcoDoBot } = require('./services/evolution');
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, limparRascunho,
+  carregarRascunho, salvarRascunho, limparRascunho,
   buscarInfo, atualizarStatusPedido,
   buscarCupomAtivoPorTelefone,
+  garantirCliente, verificarPausa, pausarAtendimento,
+  reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
-const { rodarAgente, confirmarPedido } = require('./agent');
+const { rodarAgente, confirmarPedido, gerarFollowup } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
 
@@ -21,6 +23,20 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+
+// ─── RESPOSTA CENTRAL ──────────────────────────────────────────────────────────
+// Todo texto que sai do bot passa por aqui: envia, salva no histórico e stampa
+// o rastreio de silêncio (ultima_msg_em/role) usado pelo follow-up. Centralizado
+// de propósito — evita ter que lembrar de stampar em cada um dos vários pontos
+// que respondem ao cliente.
+async function responder(telefone, texto, { requestId, etapa }) {
+  await comRetry(() => enviarTexto(telefone, texto), { tentativas: 3, requestId, etapa });
+  await salvarMensagem(telefone, 'assistant', texto);
+  await salvarRascunho(telefone, {
+    ultima_msg_em: new Date().toISOString(),
+    ultima_msg_role: 'assistant',
+  }).catch(err => logger.warn('rascunho/stamp-assistant-falhou', err.message, { requestId, telefone }));
+}
 
 // ─── DEDUPLICAÇÃO DE MENSAGENS ────────────────────────────────────────────────
 const msgProcessadas = new Map();
@@ -97,6 +113,20 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  // ── Mensagem própria (fromMe): eco do bot ou atendente humano assumiu? ──────
+  if (msg.fromMe) {
+    if (ehEcoDoBot(msg.telefone, msg.msgId)) return; // eco da nossa própria resposta, ignora
+    try {
+      await pausarAtendimento(msg.telefone, 10 * 60_000, 'atendente humano respondeu');
+      logger.info('pausa/atendente-humano', 'Atendente respondeu, pausando IA conversacional por 10min', {
+        requestId, telefone: msg.telefone,
+      });
+    } catch (err) {
+      logger.error('pausa/erro', err.message, { requestId, telefone: msg.telefone, stack: err.stack });
+    }
+    return;
+  }
+
   const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
@@ -135,6 +165,27 @@ app.post('/webhook', async (req, res) => {
 
     if (!conteudo?.trim()) return;
 
+    // ── Cliente existe desde a 1ª mensagem (não só na compra) + origem de anúncio ─
+    garantirCliente(telefone, pushName, msg.adInfo).catch(err =>
+      logger.warn('cliente/garantir-falhou', err.message, { requestId, telefone }));
+
+    if (msg.adInfo) {
+      logger.info('anuncio/detectado', 'Contexto de anúncio (CTWA) identificado', { requestId, telefone, adInfo: msg.adInfo });
+    } else if (msg.contextInfoRaw) {
+      // Ajuda a validar/corrigir os paths de detecção contra tráfego real
+      logger.info('anuncio/contextinfo-sem-ad', 'contextInfo presente sem externalAdReplyInfo', {
+        requestId, telefone, contextInfoRaw: msg.contextInfoRaw,
+      });
+    }
+
+    // ── Salva a mensagem do cliente + marca rastreio de silêncio (p/ follow-up) ─
+    await salvarMensagem(telefone, 'user', conteudo);
+    await salvarRascunho(telefone, {
+      ultima_msg_em: new Date().toISOString(),
+      ultima_msg_role: 'user',
+      followup_enviado: false,
+    }).catch(err => logger.warn('rascunho/stamp-user-falhou', err.message, { requestId, telefone }));
+
     // ── Estado ──────────────────────────────────────────────────────────────
     const [historico, rascunho, ofertaAtiva] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
@@ -152,26 +203,29 @@ app.post('/webhook', async (req, res) => {
     });
 
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
+    // Determinístico — continua funcionando mesmo com o atendimento pausado.
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
       const pararDigitando = manterDigitando(telefone);
       try {
-        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
+        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'preparando'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
         await limparRascunho(telefone);
         const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
-        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        await responder(telefone, txt, { requestId, etapa: 'enviarPixOk' });
         return;
       } catch (err) {
         logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
-        // cai para o agente lidar
+        const txt = 'Recebi seu comprovante, mas tive um problema técnico pra confirmar automaticamente 😅 Nossa equipe vai conferir e liberar seu pedido manualmente em instantes.';
+        await responder(telefone, txt, { requestId, etapa: 'pixErroHonesto' }).catch(() => {});
+        return;
       } finally {
         pararDigitando();
       }
     }
 
     // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
+    // Determinístico — continua funcionando mesmo com o atendimento pausado.
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
       const pararDigitando = manterDigitando(telefone);
@@ -197,8 +251,7 @@ app.post('/webhook', async (req, res) => {
             `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🎩`;
         }
 
-        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        await responder(telefone, txt, { requestId, etapa: 'enviarConfirmacao' });
         return;
       } catch (err) {
         if (err.jaProcessando) {
@@ -212,12 +265,17 @@ app.post('/webhook', async (req, res) => {
         const falta = err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
-        await enviarTexto(telefone, `Opa! ${falta}`);
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', falta)]);
+        await responder(telefone, `Opa! ${falta}`, { requestId, etapa: 'confirmarErro' }).catch(() => {});
         return;
       } finally {
         pararDigitando();
       }
+    }
+
+    // ── Atendimento pausado (atendente humano assumiu)? Só bloqueia a partir daqui ─
+    if (await verificarPausa(telefone)) {
+      logger.info('pausa/ativa', 'Atendimento pausado, IA não respondeu', { requestId, telefone });
+      return;
     }
 
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
@@ -228,23 +286,77 @@ app.post('/webhook', async (req, res) => {
 
       if (!resposta) {
         logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
-        await enviarTexto(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?');
+        await responder(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?', { requestId, etapa: 'respostaVazia' });
         return;
       }
 
-      await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
+      await responder(telefone, resposta, { requestId, etapa: 'enviarResposta' });
       logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
-
-      await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
     } finally {
       pararDigitandoAgente();
     }
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
-    try { await enviarTexto(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
+    try {
+      await responder(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!', { requestId, etapa: 'erroGeral' });
+    } catch {}
   }
 });
+
+// ─── POLLER: FOLLOW-UP DE SILÊNCIO + WATCHDOG DE PEDIDO TRAVADO ───────────────
+// Roda dentro do mesmo processo (container único, sem clustering) a cada 60s.
+// Usa claim atômico (UPDATE...RETURNING) em supabase.js — não é "SELECT depois
+// agir", então não tem corrida com uma mensagem nova chegando no meio.
+
+const SILENCIO_FOLLOWUP_MS = 7 * 60_000;
+const TRAVADO_WATCHDOG_MS = 2 * 60_000;
+
+async function pollarFollowups() {
+  const candidatos = await reivindicarFollowups(SILENCIO_FOLLOWUP_MS);
+  for (const rascunho of candidatos) {
+    const requestId = uuid().slice(0, 8);
+    const { telefone } = rascunho;
+    try {
+      if (await verificarPausa(telefone)) {
+        logger.info('followup/pausado', 'Atendimento pausado, follow-up não enviado', { requestId, telefone });
+        continue;
+      }
+      const historico = await carregarHistorico(telefone);
+      const texto = await gerarFollowup(historico, rascunho, requestId, telefone);
+      if (!texto) continue;
+      await responder(telefone, texto, { requestId, etapa: 'followup' });
+      logger.info('followup/enviado', 'Follow-up enviado após silêncio', { requestId, telefone });
+    } catch (err) {
+      logger.error('followup/erro', err.message, { requestId, telefone, stack: err.stack });
+    }
+  }
+}
+
+async function pollarTravados() {
+  const travados = await reivindicarTravados(TRAVADO_WATCHDOG_MS);
+  for (const r of travados) {
+    logger.error('watchdog/rascunho-travado',
+      'Rascunho preso em "processando" — possível pedido não finalizado, verificar manualmente com o cliente',
+      { telefone: r.telefone, nome_cliente: r.nome_cliente, itens: r.itens, updated_at: r.updated_at });
+  }
+}
+
+let pollando = false;
+async function pollar() {
+  if (pollando) return;
+  pollando = true;
+  try {
+    await pollarFollowups();
+    await pollarTravados();
+    logger.info('poller/heartbeat', 'Ciclo do poller concluído', {});
+  } catch (err) {
+    logger.error('poller/erro-geral', err.message, { stack: err.stack });
+  } finally {
+    pollando = false;
+  }
+}
+setInterval(pollar, 60_000);
 
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;

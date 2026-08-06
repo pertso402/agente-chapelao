@@ -77,7 +77,7 @@ Conduzir o cliente do "oi" até o pedido confirmado, SEM falhar nenhuma etapa. V
 5. Pergunte a forma de pagamento: PIX, dinheiro ou cartão.
 6. SEMPRE que coletar algo, chame salvar_dados_pedido. O retorno te diz o que ainda falta.
 7. Quando o retorno disser "PRONTO_PARA_CONFIRMACAO": apresente o RESUMO FINAL e peça *SIM*.
-8. Após o pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", chame atualizar_status_pedido com "aguardando_preparo" e agradeça.
+8. Após o pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", chame atualizar_status_pedido com "preparando" e agradeça.
 
 ## REGRAS CRÍTICAS (NUNCA quebrar)
 ⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
@@ -251,4 +251,35 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
   return resultado;
 }
 
-module.exports = { rodarAgente, confirmarPedido, buildSystemPrompt };
+// ─── FOLLOW-UP (cliente ficou em silêncio) ────────────────────────────────────
+// Gera UMA mensagem curta e natural de retomada. Sem "tools" no payload:
+// essa chamada não tem como disparar nenhuma tool, é só texto — garante que
+// o follow-up nunca mexe em estado (não salva dados, não cria pedido).
+
+async function gerarFollowup(historico, rascunho, requestId, telefone) {
+  const openai = getClient();
+
+  const messages = [
+    { role: 'system', content: buildSystemPrompt(rascunho) },
+    ...historico.map(h => ({ role: h.role, content: h.content })),
+    {
+      role: 'system',
+      content: 'O cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando o assunto de onde parou — sem inventar informação nova, sem repetir o cardápio inteiro, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
+    },
+  ];
+
+  const resposta = await comRetry(
+    () => openai.chat.completions.create({
+      model: MODEL,
+      max_tokens: 200,
+      messages,
+    }),
+    { tentativas: 2, requestId, etapa: 'openai/followup' }
+  );
+
+  const texto = resposta.choices[0].message?.content?.trim() || '';
+  logger.step(requestId, telefone, 'followup/gerado', { chars: texto.length });
+  return texto;
+}
+
+module.exports = { rodarAgente, confirmarPedido, buildSystemPrompt, gerarFollowup };

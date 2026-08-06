@@ -126,6 +126,65 @@ async function tentarIniciarConfirmacao(telefone) {
   return (data || []).length > 0;
 }
 
+// ─── POLLER: FOLLOW-UP E WATCHDOG ─────────────────────────────────────────────
+// UPDATE...RETURNING atômico (supabase-js faz isso num único round-trip via
+// PostgREST) — evita a corrida de "SELECT candidatos → depois agir → depois
+// marcar", onde uma mensagem nova do cliente podia chegar no meio e o
+// follow-up sair por cima, redundante.
+
+async function reivindicarFollowups(silencioMs) {
+  const limite = new Date(Date.now() - silencioMs).toISOString();
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ followup_enviado: true })
+    .eq('followup_enviado', false)
+    .eq('ultima_msg_role', 'assistant')
+    .neq('etapa_atual', 'processando')
+    .lte('ultima_msg_em', limite)
+    .select('*');
+  if (error) throw new Error(`Supabase/reivindicarFollowups: ${error.message}`);
+  return data || [];
+}
+
+// Rascunhos presos em 'processando' há muito tempo (processo pode ter morrido
+// no meio de confirmarPedido, entre a trava atômica e o final de
+// criarPedidoCompleto). NÃO tenta recriar o pedido sozinho — risco de
+// duplicar se criarPedidoCompleto já tinha terminado. Só alerta pro dono agir.
+async function reivindicarTravados(travadoMs) {
+  const limite = new Date(Date.now() - travadoMs).toISOString();
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ alerta_travado_enviado: true })
+    .eq('etapa_atual', 'processando')
+    .eq('alerta_travado_enviado', false)
+    .lte('updated_at', limite)
+    .select('*');
+  if (error) throw new Error(`Supabase/reivindicarTravados: ${error.message}`);
+  return data || [];
+}
+
+// ─── PAUSA DE ATENDIMENTO (atendente humano assumiu) ─────────────────────────
+
+async function verificarPausa(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { data } = await sb
+    .from('agente_pausas')
+    .select('pausado_ate')
+    .eq('telefone', tel)
+    .maybeSingle();
+  if (!data?.pausado_ate) return false;
+  return new Date(data.pausado_ate).getTime() > Date.now();
+}
+
+async function pausarAtendimento(telefone, ms, motivo) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const pausadoAte = new Date(Date.now() + ms).toISOString();
+  const { error } = await sb
+    .from('agente_pausas')
+    .upsert({ telefone: tel, pausado_ate: pausadoAte, motivo: motivo || null }, { onConflict: 'telefone' });
+  if (error) throw new Error(`Supabase/pausarAtendimento: ${error.message}`);
+}
+
 // ─── PRODUTOS / CARDÁPIO ──────────────────────────────────────────────────────
 
 async function buscarProdutos() {
@@ -177,6 +236,7 @@ async function validarItens(itensInput) {
       nome: prod.nome.trim(),
       quantidade: Math.max(1, Number(item.quantidade) || 1),
       preco_unitario: precoFinal(prod),
+      observacao: item.observacao ? String(item.observacao).trim() : null,
     });
   }
 
@@ -248,12 +308,40 @@ async function getTaxaEntrega() {
 
 // ─── CLIENTES ─────────────────────────────────────────────────────────────────
 
+// Upsert leve chamado na PRIMEIRA MENSAGEM de qualquer conversa (não só na
+// compra). Nunca sobrescreve nome/origem de um contato que já existe —
+// preserva a atribuição do primeiro contato. Não lança: chamado é best-effort.
+async function garantirCliente(telefone, pushName, adInfo) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const payload = { telefone: tel, nome: pushName || 'Cliente', total_pedidos: 0, total_gasto: 0 };
+  if (adInfo) {
+    payload.veio_de_anuncio = true;
+    payload.anuncio_meta = adInfo;
+  }
+  const { error } = await sb
+    .from('clientes')
+    .upsert(payload, { onConflict: 'telefone', ignoreDuplicates: true });
+  if (error) throw new Error(`Supabase/garantirCliente: ${error.message}`);
+}
+
+// Marca o primeiro sinal real de interesse (carrinho montado) — idempotente,
+// nunca sobrescreve um timestamp já setado. Alimenta a tag gerada em clientes.
+async function marcarInteresse(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { error } = await sb
+    .from('clientes')
+    .update({ demonstrou_interesse_em: new Date().toISOString() })
+    .eq('telefone', tel)
+    .is('demonstrou_interesse_em', null);
+  if (error) throw new Error(`Supabase/marcarInteresse: ${error.message}`);
+}
+
 async function buscarOuCriarCliente(nome, telefone, endereco) {
   const tel = String(telefone).replace(/\D/g, '');
 
   const { data: ex } = await sb
     .from('clientes')
-    .select('id, total_pedidos, total_gasto, primeiro_pedido')
+    .select('id, total_pedidos, total_gasto, primeiro_pedido, veio_de_anuncio')
     .eq('telefone', tel)
     .maybeSingle();
 
@@ -269,7 +357,7 @@ async function buscarOuCriarCliente(nome, telefone, endereco) {
   const { data, error } = await sb
     .from('clientes')
     .insert({ nome, telefone: tel, endereco: endereco || null, total_pedidos: 0, total_gasto: 0 })
-    .select('id, total_pedidos, total_gasto, primeiro_pedido')
+    .select('id, total_pedidos, total_gasto, primeiro_pedido, veio_de_anuncio')
     .single();
   if (error) throw new Error(`Supabase/criarCliente: ${error.message}`);
   return data;
@@ -350,7 +438,17 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const cupomEhBrinde = cupom?.tipo === 'brinde';
   const listaBrinde = cupomEhBrinde ? parseItens(itensBrinde) : [];
 
-  const subtotal = calcularSubtotal(listaItens);
+  // Última camada defensiva: resolve preço FRESCO por produto_id (não confia
+  // no preço cacheado no rascunho, que pode ter ficado desatualizado se o
+  // cardápio mudou durante a conversa). Se o produto sumiu, erro claro.
+  const catalogo = await buscarProdutos();
+  const listaRepreçada = listaItens.map(i => {
+    const prod = catalogo.find(p => p.id === i.produto_id);
+    if (!prod) throw new Error(`Produto "${i.nome}" não está mais disponível no cardápio.`);
+    return { ...i, preco_unitario: precoFinal(prod) };
+  });
+
+  const subtotal = calcularSubtotal(listaRepreçada);
   const taxaConfig = await getTaxaEntrega();
   const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
   // Cupom de brinde não abate percentual — o benefício são os itens grátis.
@@ -360,6 +458,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const total = parseFloat((subtotal + taxaEntrega - desconto).toFixed(2));
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
+  const canal = cliente.veio_de_anuncio ? 'whatsapp_anuncio' : 'whatsapp_organico';
 
   const { data: pedido, error: pErr } = await sb
     .from('pedidos')
@@ -375,17 +474,19 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       cupom_id: cupom ? cupom.id : null,
       total,
       observacao: null,
+      canal,
     })
     .select('id, numero_pedido, total')
     .single();
   if (pErr) throw new Error(`Supabase/criarPedido: ${pErr.message}`);
 
-  const rows = listaItens.map(i => ({
+  const rows = listaRepreçada.map(i => ({
     pedido_id: pedido.id,
     produto_id: i.produto_id || null,
     nome_produto: i.nome,
     quantidade: Number(i.quantidade),
     preco_unitario: Number(i.preco_unitario),
+    observacao: i.observacao || null,
     total: parseFloat((Number(i.preco_unitario) * Number(i.quantidade)).toFixed(2)),
   }));
 
@@ -466,9 +567,9 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 
 module.exports = {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
-  tentarIniciarConfirmacao,
+  carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
-  buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
+  garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
+  verificarPausa, pausarAtendimento, reivindicarFollowups, reivindicarTravados,
 };

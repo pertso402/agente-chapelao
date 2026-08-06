@@ -82,11 +82,11 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'atualizar_status_pedido',
-      description: 'Atualiza o status do pedido. Use "aguardando_preparo" após confirmar comprovante PIX.',
+      description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
       parameters: {
         type: 'object',
         properties: {
-          novo_status: { type: 'string', enum: ['aguardando_preparo', 'cancelado'] },
+          novo_status: { type: 'string', enum: ['preparando', 'cancelado'] },
         },
         required: ['novo_status'],
       },
@@ -172,6 +172,11 @@ async function executarTool(nome, args, contexto = {}) {
 
       const itens = parseItens(rascunho.itens);
       const subtotal = calcularSubtotal(itens);
+
+      // Primeiro sinal real de interesse (carrinho montado) — alimenta a tag do cliente
+      if (itens.length) {
+        db.marcarInteresse(telefone).catch(() => {});
+      }
 
       const brindes = parseItens(rascunho.itens_brinde);
 
