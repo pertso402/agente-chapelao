@@ -395,7 +395,7 @@ async function buscarCupomAtivoPorTelefone(telefone) {
   const hoje = new Date().toISOString().slice(0, 10);
   const { data: cupom, error } = await sb
     .from('cupons')
-    .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id, tipo, descricao')
+    .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id, tipo, descricao, itens_permitidos')
     .eq('cliente_id', cliente.id)
     .eq('usado', false)
     .gte('valido_ate', hoje)
@@ -436,7 +436,24 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   // Brinde só existe se houver cupom de brinde ativo. Sem essa trava, bastaria
   // a LLM preencher itens_brinde por conta própria pra dar comida de graça.
   const cupomEhBrinde = cupom?.tipo === 'brinde';
-  const listaBrinde = cupomEhBrinde ? parseItens(itensBrinde) : [];
+  let listaBrinde = cupomEhBrinde ? parseItens(itensBrinde) : [];
+
+  // E o brinde tem que estar na lista do cupom. A busca por nome do catálogo é
+  // aproximada — "refrigerante" casa com a Coca de 2L —, então sem conferir
+  // aqui o cliente poderia levar 2 litros no lugar do mini de 200ml.
+  const permitidos = cupom?.itens_permitidos;
+  if (cupomEhBrinde && Array.isArray(permitidos) && permitidos.length) {
+    const alvos = permitidos.map(normalizar);
+    const recusados = listaBrinde.filter(b => !alvos.includes(normalizar(b.nome)));
+    if (recusados.length) {
+      logger.warn('pedido/brinde-fora-da-lista', 'Item de cortesia recusado', {
+        cupom: cupom.codigo,
+        recusados: recusados.map(r => r.nome),
+        permitidos,
+      });
+    }
+    listaBrinde = listaBrinde.filter(b => alvos.includes(normalizar(b.nome)));
+  }
 
   // Última camada defensiva: resolve preço FRESCO por produto_id (não confia
   // no preço cacheado no rascunho, que pode ter ficado desatualizado se o

@@ -40,14 +40,19 @@ function buildSystemPrompt(rascunho, ofertaAtiva) {
 
   let ofertaTexto = '';
   if (ofertaAtiva && ofertaAtiva.tipo === 'brinde') {
+    const permitidos = ofertaAtiva.itens_permitidos || [];
+    const listaPermitidos = permitidos.length
+      ? `\n- Os ÚNICOS itens que podem sair como cortesia são: ${permitidos.map(p => `*${p}*`).join(' e ')}. Use esses nomes EXATOS em itens_brinde. O sistema recusa qualquer outro item, então oferecer coisa diferente cria uma promessa que não vai ser cumprida.`
+      : '';
+
     ofertaTexto = `\n\n## 🎁 BRINDE DE PRIMEIRA COMPRA ATIVO PRA ESTE CLIENTE
 Este cliente recebeu uma oferta com o cupom *${ofertaAtiva.codigo}*, válido até ${ofertaAtiva.valido_ate}.
 O que ele ganhou: *${ofertaAtiva.descricao || 'brinde de primeira compra'}*.
 
-- Esse cupom NÃO é desconto em dinheiro. O benefício são os itens de cortesia acima. NUNCA fale em porcentagem de desconto pra ele.
-- Você PRECISA perguntar quais itens de cortesia ele quer (ex: qual refrigerante, qual sobremesa), usando os nomes do cardápio — chame buscar_cardapio se precisar.
-- Depois que ele escolher, chame salvar_dados_pedido com o campo *itens_brinde*. O sistema zera o preço desses itens sozinho.
-- Não dê brinde além do que está descrito acima, nem troque por desconto.
+- Esse cupom NÃO é desconto em dinheiro. O benefício são os itens de cortesia acima. NUNCA fale em porcentagem de desconto pra ele.${listaPermitidos}
+- Confirme com ele que quer o brinde e chame salvar_dados_pedido com o campo *itens_brinde*. O sistema zera o preço desses itens sozinho.
+- NUNCA ofereça outro tamanho, outra marca ou outro item como brinde, mesmo que o cliente peça. Se ele quiser algo diferente, explique com gentileza que a cortesia é essa e que o resto ele pode adicionar ao pedido normalmente.
+- Não troque o brinde por desconto.
 - Se ele topar pedir ("quero", "bora", "vou querer"), conduza o pedido normalmente pelo fluxo de sempre.
 - Mencione a cortesia de forma leve e natural, sem parecer script de vendas.`;
   } else if (ofertaAtiva) {
