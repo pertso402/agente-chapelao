@@ -38,6 +38,21 @@ async function responder(telefone, texto, { requestId, etapa }) {
   }).catch(err => logger.warn('rascunho/stamp-assistant-falhou', err.message, { requestId, telefone }));
 }
 
+// ─── FILA POR TELEFONE ─────────────────────────────────────────────────────────
+// Evita que 2+ mensagens do MESMO cliente, chegando rápido uma atrás da outra
+// (antes da primeira terminar seu round-trip com o GPT-4o, que leva alguns
+// segundos), processem em paralelo e se atropelem escrevendo o rascunho —
+// leitura+escrita do estado não é atômica fora do SIM (que já tem trava própria).
+// Clientes DIFERENTES continuam 100% em paralelo; só o mesmo telefone é
+// serializado, e um erro numa mensagem nunca trava as próximas dessa fila.
+const filasPorTelefone = new Map();
+function enfileirar(telefone, tarefa) {
+  const anterior = filasPorTelefone.get(telefone) || Promise.resolve();
+  const atual = anterior.then(tarefa, tarefa);
+  filasPorTelefone.set(telefone, atual.catch(() => {}));
+  return atual;
+}
+
 // ─── DEDUPLICAÇÃO DE MENSAGENS ────────────────────────────────────────────────
 const msgProcessadas = new Map();
 function jaProcessada(msgId) {
@@ -127,6 +142,14 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  // Serializa por telefone: mensagens do MESMO cliente chegando rápido uma
+  // atrás da outra esperam a anterior terminar antes de ler/escrever o
+  // rascunho — evita duas escritas concorrentes se atropelarem. Clientes
+  // diferentes continuam processando 100% em paralelo.
+  await enfileirar(msg.telefone, () => processarMensagem(msg, requestId));
+});
+
+async function processarMensagem(msg, requestId) {
   const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
@@ -302,7 +325,7 @@ app.post('/webhook', async (req, res) => {
       await responder(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!', { requestId, etapa: 'erroGeral' });
     } catch {}
   }
-});
+}
 
 // ─── POLLER: FOLLOW-UP DE SILÊNCIO + WATCHDOG DE PEDIDO TRAVADO ───────────────
 // Roda dentro do mesmo processo (container único, sem clustering) a cada 60s.
