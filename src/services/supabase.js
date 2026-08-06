@@ -70,6 +70,19 @@ async function salvarRascunho(telefone, campos) {
   }
 }
 
+// Atualiza campos de rastreio SÓ SE o rascunho já existir — nunca cria um novo.
+// Diferente de salvarRascunho (upsert): usado depois de RESPONDER ao cliente,
+// onde criar um rascunho do zero seria ressuscitar um pedido que acabou de
+// ser finalizado e apagado por limparRascunho — causava follow-up disparar
+// pra cliente que já tinha fechado o pedido.
+async function stamparRascunho(telefone, campos) {
+  const { error } = await sb
+    .from('pedido_rascunho')
+    .update({ ...campos, updated_at: new Date().toISOString() })
+    .eq('telefone', telefone);
+  if (error) throw new Error(`Supabase/stamparRascunho: ${error.message}`);
+}
+
 // Alto nível: merge campos + valida itens + RECALCULA etapa determinística.
 // Retorna { rascunho, avaliacao, naoEncontrados }.
 async function atualizarRascunho(telefone, campos) {
@@ -132,6 +145,12 @@ async function tentarIniciarConfirmacao(telefone) {
 // marcar", onde uma mensagem nova do cliente podia chegar no meio e o
 // follow-up sair por cima, redundante.
 
+// Lista positiva (não negativa) das etapas em que o pedido AINDA está sendo
+// montado — nunca dispara follow-up depois que o pedido já foi confirmado,
+// nem em 'aguardando_pix' (cliente já disse SIM, só falta mandar o
+// comprovante) nem em 'processando' (transação em andamento).
+const ETAPAS_PEDIDO_ABERTO = ['inicio', 'coletando_itens', 'coletando_dados', 'aguardando_confirmacao'];
+
 async function reivindicarFollowups(silencioMs) {
   const limite = new Date(Date.now() - silencioMs).toISOString();
   const { data, error } = await sb
@@ -139,7 +158,7 @@ async function reivindicarFollowups(silencioMs) {
     .update({ followup_enviado: true })
     .eq('followup_enviado', false)
     .eq('ultima_msg_role', 'assistant')
-    .neq('etapa_atual', 'processando')
+    .in('etapa_atual', ETAPAS_PEDIDO_ABERTO)
     .lte('ultima_msg_em', limite)
     .select('*');
   if (error) throw new Error(`Supabase/reivindicarFollowups: ${error.message}`);
@@ -584,7 +603,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 
 module.exports = {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
+  carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
   buscarCupomAtivoPorTelefone, darBaixaCupom,

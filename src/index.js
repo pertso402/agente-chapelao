@@ -9,7 +9,7 @@ const { extrairMensagem, downloadMidia, enviarTexto, manterDigitando, ehEcoDoBot
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, salvarRascunho, limparRascunho,
+  carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho,
   buscarInfo, atualizarStatusPedido,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento,
@@ -32,7 +32,11 @@ const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
 async function responder(telefone, texto, { requestId, etapa }) {
   await comRetry(() => enviarTexto(telefone, texto), { tentativas: 3, requestId, etapa });
   await salvarMensagem(telefone, 'assistant', texto);
-  await salvarRascunho(telefone, {
+  // stamparRascunho (não salvarRascunho): só atualiza se o rascunho já existir.
+  // Se o pedido acabou de ser finalizado (limparRascunho apagou a linha
+  // segundos atrás), isso NÃO pode recriar um rascunho fantasma — era
+  // exatamente isso que fazia o follow-up disparar pra pedido já pronto.
+  await stamparRascunho(telefone, {
     ultima_msg_em: new Date().toISOString(),
     ultima_msg_role: 'assistant',
   }).catch(err => logger.warn('rascunho/stamp-assistant-falhou', err.message, { requestId, telefone }));
