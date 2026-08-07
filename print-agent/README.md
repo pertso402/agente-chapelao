@@ -1,126 +1,100 @@
 # 🖨️ Impressão automática na térmica
 
-Serviço que roda **no PC do restaurante**, ao lado da impressora. Ele vigia a
-tabela `pedidos` e imprime sozinho todo pedido novo — ninguém precisa clicar
-em nada.
+Serviço que roda **no notebook do restaurante**, ligado na impressora. Vigia a
+tabela `pedidos` e imprime sozinho todo pedido novo.
+
+> Para quem vai instalar na loja: leia o **`LEIA-ME.txt`** — é o mesmo conteúdo
+> sem jargão. Este arquivo aqui é a parte técnica.
 
 ```
 Cliente fecha no WhatsApp
         ↓
 Agente grava o pedido no Supabase (impresso = false)
         ↓
-Este serviço, no PC da loja, vê o pedido e imprime
+Este serviço, no notebook, reivindica o pedido e imprime
         ↓
 Marca impresso = true (nunca sai duas vezes)
 ```
 
-**Por que não imprimir direto do servidor?** Porque a impressora está na
-cozinha e o agente roda na nuvem (EasyPanel) — a nuvem não alcança um cabo USB
-em Umuarama. Este serviço é a ponte, e é ele que precisa estar na mesma rede
-da impressora.
+**Por que não imprimir do servidor?** A impressora está num cabo USB em
+Umuarama e o agente roda na nuvem. Este serviço é a ponte.
 
 **Por que a fila fica no banco?** Internet de restaurante cai. Com a fila no
-banco, o pedido espera e sai assim que a conexão volta. Nada se perde.
+banco o pedido espera e sai quando a conexão volta.
 
 ---
 
-## Passo 1 — Rodar a SQL (uma vez só)
+## Instalação (Windows, impressora USB)
 
-No Supabase → SQL Editor, cole e execute o conteúdo de
-[`../supabase/impressao.sql`](../supabase/impressao.sql). Ela cria as colunas
-de controle na tabela `pedidos`.
+1. Copie esta pasta para o notebook (ex.: `C:\chapelao-impressao`)
+2. Instale o [Node.js LTS](https://nodejs.org) — uma vez só
+3. Clique em `1-INSTALAR.bat` → `2-IMPRIMIR-TESTE.bat` → `3-INICIAR.bat`
 
-## Passo 2 — Instalar no PC da loja
+Não precisa compartilhar a impressora, nem cabo de rede, nem build tools.
 
-Precisa de [Node.js 18+](https://nodejs.org) instalado. Depois, no terminal:
+## Como a impressão USB funciona
 
-```bash
-cd print-agent
-npm install
+Os dois caminhos usuais no Windows dão trabalho: o pacote `printer` do npm é
+módulo nativo (exige Visual Studio Build Tools) e o `//localhost/SHARE` exige
+compartilhar a impressora na rede.
+
+Aqui o cupom é montado com `node-thermal-printer` (só para gerar os bytes
+ESC/POS) e entregue ao **spooler do Windows** via `winspool.drv`, com tipo de
+dado `RAW` — os bytes passam sem o driver tentar formatar. Ver
+[`impressora-windows.js`](impressora-windows.js).
+
+Basta o nome que aparece em *Impressoras e scanners*:
+
+```
+PRINTER_INTERFACE=windows:Elgin i9
 ```
 
-## Passo 3 — Configurar
+Impressora de rede continua suportada:
 
-Copie o exemplo e edite:
-
-```bash
-copy .env.example .env
+```
+PRINTER_INTERFACE=tcp://192.168.0.87:9100
 ```
 
-O único campo que costuma dar trabalho é o `PRINTER_INTERFACE`:
+## Configuração (`.env`)
 
-| Como a impressora está ligada | O que colocar |
+| Variável | Para quê |
 |---|---|
-| **Rede/Ethernet** (recomendado) | `tcp://192.168.0.87:9100` — troque pelo IP dela |
-| **USB no Windows** | `//localhost/TERMICA` — compartilhe a impressora com um nome **sem espaços** |
-| **USB no Linux** | `/dev/usb/lp0` |
+| `PRINTER_INTERFACE` | `windows:NOME` (USB) ou `tcp://IP:9100` (rede) |
+| `PRINTER_TIPO` | `EPSON` (padrão), `STAR`, `DARUMA`, `TANCA` |
+| `PRINTER_LARGURA` | `48` para bobina 80mm, `32` para 58mm |
+| `VIAS` | Cupons por pedido (2 = cozinha + entregador) |
+| `SUPA_URL` / `SUPA_SERVICE_KEY` | Acesso ao banco |
+| `INTERVALO_MS` | Frequência da checagem (padrão 3000) |
+| `MAX_TENTATIVAS` | Falhas antes de desistir do pedido (padrão 5) |
 
-> Para descobrir o IP de uma impressora de rede: desligue, segure o botão
-> **FEED** e ligue — ela imprime uma folha de autoteste com o IP.
+## Rodar como serviço
 
-Bobina de 58mm? Troque `PRINTER_LARGURA=48` para `32`.
+O `3-INICIAR.bat` já reinicia sozinho se o processo cair. Para subir junto com
+o Windows, coloque um atalho dele em `shell:startup`.
 
-## Passo 4 — Testar antes de valer
-
-```bash
-npm run teste
-```
-
-Sai um cupom de teste com acentos e valores. Se os acentos vierem errados,
-troque `CharacterSet.PC860_PORTUGUESE` por `PC850_MULTILINGUAL` no
-`teste-impressora.js` e no `index.js`.
-
-## Passo 5 — Deixar rodando sempre
-
-```bash
-npm start
-```
-
-Para o serviço subir sozinho quando o PC ligar (e reiniciar se travar), use o
-**PM2**:
+Alternativa com PM2:
 
 ```bash
 npm install -g pm2 pm2-windows-startup
 pm2 start index.js --name chapelao-impressao
-pm2 save
-pm2-startup install
-```
-
-Comandos do dia a dia:
-
-```bash
-pm2 logs chapelao-impressao     # ver o que está acontecendo
-pm2 restart chapelao-impressao  # reiniciar
-pm2 status                      # está rodando?
+pm2 save && pm2-startup install
 ```
 
 ---
 
 ## Perguntas frequentes
 
-**Vai imprimir o mesmo pedido duas vezes?**
-Não. Cada pedido é reivindicado com um `UPDATE ... WHERE impresso = false`: se
-dois PCs tentarem ao mesmo tempo, só um ganha. Pode rodar em quantos
-computadores quiser.
+**Imprime o mesmo pedido duas vezes?**
+Não. Cada pedido é reivindicado com `UPDATE ... WHERE impresso = false`: se
+dois computadores tentarem ao mesmo tempo, só um ganha a corrida.
 
-**A impressora ficou sem papel / desligada. Perdi o pedido?**
-Não. Ele volta pra fila e sai quando a impressora voltar. Depois de 5
-tentativas ele para de ser tentado (pra não travar a fila) e o motivo fica
-gravado na coluna `impressao_erro` da tabela `pedidos`.
+**Impressora sem papel / desligada — perdi o pedido?**
+Não. Volta pra fila. Após `MAX_TENTATIVAS` para de tentar (pra não travar a
+fila) e o motivo fica na coluna `impressao_erro`.
 
-**Quero uma via pra cozinha e outra pro entregador.**
-`VIAS=2` no `.env`.
-
-**Quero reimprimir um pedido.**
-No Supabase → Table Editor → `pedidos`, marque `impresso` como `false` na
-linha do pedido. Ele sai de novo em segundos.
-
-**Duas impressoras (cozinha e balcão)?**
-Rode este serviço duas vezes com `PRINTER_INTERFACE` diferente — mas atenção:
-cada pedido sai em **uma** delas, não nas duas (a trava anti-duplicação impede).
-Para imprimir nas duas, copie a pasta e troque a condição de reivindicação —
-me chame que eu ajusto.
+**Reimprimir um pedido?**
+No Supabase → `pedidos`, marque `impresso = false` na linha. Sai em segundos.
 
 **Segurança:** o `.env` contém a `SUPA_SERVICE_KEY`, que dá acesso total ao
-banco. Ele fica num PC físico da loja — não copie para pendrive, não mande por
-WhatsApp e não coloque esse PC em rede pública.
+banco. Ele fica num notebook físico da loja — não copie para pendrive nem use
+o notebook em Wi-Fi público.

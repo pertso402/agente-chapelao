@@ -16,6 +16,7 @@ require('dotenv').config();
 
 const { createClient } = require('@supabase/supabase-js');
 const { ThermalPrinter, PrinterTypes, CharacterSet } = require('node-thermal-printer');
+const { imprimirRaw, conferirImpressora } = require('./impressora-windows');
 
 const {
   SUPA_URL,
@@ -43,11 +44,22 @@ const log = (nivel, msg, extra = {}) =>
   console.log(JSON.stringify({ ts: new Date().toISOString(), nivel, msg, ...extra }));
 
 // ─── IMPRESSORA ───────────────────────────────────────────────────────────────
+// Dois modos:
+//   windows:NOME DA IMPRESSORA → USB no Windows. Monta o cupom, pega os bytes
+//     ESC/POS e manda direto pro spooler (ver impressora-windows.js). Não exige
+//     compartilhar a impressora nem compilar módulo nativo.
+//   tcp://IP:9100 (ou caminho de arquivo) → impressora de rede. A própria
+//     biblioteca faz a conexão.
+
+const MODO_WINDOWS = PRINTER_INTERFACE.toLowerCase().startsWith('windows:');
+const NOME_IMPRESSORA_WINDOWS = MODO_WINDOWS ? PRINTER_INTERFACE.slice('windows:'.length).trim() : null;
 
 function novaImpressora() {
   return new ThermalPrinter({
     type: PrinterTypes[PRINTER_TIPO.toUpperCase()] || PrinterTypes.EPSON,
-    interface: PRINTER_INTERFACE,
+    // No modo Windows a biblioteca só monta o buffer; quem entrega é o
+    // spooler. O endereço abaixo nunca chega a ser usado.
+    interface: MODO_WINDOWS ? 'tcp://127.0.0.1:9100' : PRINTER_INTERFACE,
     characterSet: CharacterSet.PC860_PORTUGUESE, // acentos do português
     removeSpecialCharacters: false,
     width: Number(PRINTER_LARGURA),
@@ -232,14 +244,20 @@ function formatarTelefone(tel) {
 async function imprimirPedido(pedido, itens, cliente) {
   const printer = novaImpressora();
 
-  const conectada = await printer.isPrinterConnected();
-  if (!conectada) throw new Error(`Impressora não respondeu em ${PRINTER_INTERFACE}`);
+  if (!MODO_WINDOWS) {
+    const conectada = await printer.isPrinterConnected();
+    if (!conectada) throw new Error(`Impressora não respondeu em ${PRINTER_INTERFACE}`);
+  }
 
   for (let via = 0; via < Math.max(1, Number(VIAS)); via++) {
     montarCupom(printer, pedido, itens, cliente);
   }
 
-  await printer.execute();
+  if (MODO_WINDOWS) {
+    await imprimirRaw(NOME_IMPRESSORA_WINDOWS, printer.getBuffer());
+  } else {
+    await printer.execute();
+  }
   printer.clear();
 }
 
@@ -357,8 +375,22 @@ async function ciclo() {
   });
 
   try {
-    const ok = await novaImpressora().isPrinterConnected();
-    log(ok ? 'info' : 'warn', ok ? '✅ Impressora respondeu' : '⚠️  Impressora NÃO respondeu — vou seguir tentando a cada ciclo');
+    if (MODO_WINDOWS) {
+      const { existe, lista, parecida } = await conferirImpressora(NOME_IMPRESSORA_WINDOWS);
+      if (existe) {
+        log('info', `✅ Impressora "${NOME_IMPRESSORA_WINDOWS}" encontrada no Windows`);
+      } else {
+        // Nome errado é o erro nº 1 aqui (um acento, um espaço a mais). Em vez
+        // de só falhar, mostramos a lista real pra pessoa copiar e colar.
+        log('error', `❌ Não existe impressora chamada "${NOME_IMPRESSORA_WINDOWS}" neste computador.`);
+        log('error', `   Impressoras instaladas: ${lista.join(' | ') || '(nenhuma)'}`);
+        if (parecida) log('error', `   Você quis dizer: PRINTER_INTERFACE=windows:${parecida}`);
+        log('error', '   Corrija o arquivo .env e inicie de novo.');
+      }
+    } else {
+      const ok = await novaImpressora().isPrinterConnected();
+      log(ok ? 'info' : 'warn', ok ? '✅ Impressora respondeu' : '⚠️  Impressora NÃO respondeu — vou seguir tentando a cada ciclo');
+    }
   } catch (err) {
     log('warn', '⚠️  Não consegui testar a impressora agora', { erro: err.message });
   }

@@ -1,0 +1,122 @@
+═══════════════════════════════════════════════════════════════
+  IMPRESSÃO AUTOMÁTICA DE PEDIDOS — RESTAURANTE CHAPELÃO
+═══════════════════════════════════════════════════════════════
+
+Copie esta pasta inteira para o notebook que fica ligado na
+impressora térmica. Sugestão: C:\chapelao-impressao
+
+Depois é só clicar nos 3 arquivos, na ordem:
+
+   1-INSTALAR.bat        (uma vez só)
+   2-IMPRIMIR-TESTE.bat  (pra conferir se saiu no papel)
+   3-INICIAR.bat         (deixar aberto todo dia)
+
+
+───────────────────────────────────────────────────────────────
+ PRECISA INSTALAR ALGO?
+───────────────────────────────────────────────────────────────
+
+Só o Node.js, e só uma vez:
+
+   https://nodejs.org  →  botão "LTS"  →  Avançar, Avançar, Instalar
+
+O 1-INSTALAR.bat avisa se estiver faltando.
+
+NÃO precisa: compartilhar a impressora, mexer em firewall,
+instalar Visual Studio, nem cabo de rede.
+
+
+───────────────────────────────────────────────────────────────
+ SOBRE O SEU CASO (USB + Wi-Fi)
+───────────────────────────────────────────────────────────────
+
+Impressora no USB: perfeito, é o caso mais simples. O programa
+manda os dados direto pro Windows, do mesmo jeito que o Bloco de
+Notas faz quando você imprime.
+
+Wi-Fi comum (sem cabo de rede): sem problema nenhum. A internet
+serve só pra buscar os pedidos novos no sistema. Se o Wi-Fi cair,
+os pedidos ficam guardados e saem todos assim que voltar — nada
+se perde.
+
+
+───────────────────────────────────────────────────────────────
+ COMO FUNCIONA
+───────────────────────────────────────────────────────────────
+
+   Cliente fecha o pedido no WhatsApp
+             ↓
+   O pedido é gravado no sistema (na nuvem)
+             ↓
+   Este programa, aberto no notebook, vê o pedido novo
+   (ele confere de 3 em 3 segundos)
+             ↓
+   Imprime na térmica e marca como impresso
+
+O pedido nunca sai duas vezes: assim que o programa pega um
+pedido pra imprimir, ele marca no sistema que já é dele.
+
+Por que o programa precisa ficar no notebook, e não na nuvem?
+Porque a impressora está presa por um cabo USB aí. A nuvem não
+alcança esse cabo — este programa é a ponte.
+
+
+───────────────────────────────────────────────────────────────
+ O DIA A DIA
+───────────────────────────────────────────────────────────────
+
+Toda manhã, ao ligar o notebook: clique em 3-INICIAR.bat e
+minimize a janela. Só isso.
+
+A janela precisa ficar ABERTA. Pode minimizar, mas não feche.
+
+Se o programa travar por algum motivo, ele se reinicia sozinho
+em 10 segundos.
+
+Quer que ele abra sozinho junto com o Windows?
+   1. Aperte a tecla Windows + R
+   2. Digite:  shell:startup   e dê Enter
+   3. Arraste o 3-INICIAR.bat pra dentro da pasta que abriu,
+      segurando ALT (cria um atalho)
+
+
+───────────────────────────────────────────────────────────────
+ PROBLEMAS COMUNS
+───────────────────────────────────────────────────────────────
+
+"Não existe impressora chamada..."
+   O nome no arquivo .env está diferente do nome real.
+   Rode 2-IMPRIMIR-TESTE.bat: ele mostra a lista das impressoras
+   instaladas e já escreve a linha certa pra você copiar.
+
+Saiu papel em branco ou com símbolos estranhos
+   No arquivo .env, troque PRINTER_TIPO=EPSON por STAR.
+   Se não resolver, tente DARUMA, depois TANCA.
+
+Acentos errados (feijao virou feijÃ£o)
+   Me avise, é uma linha de ajuste.
+
+Texto cortado na lateral
+   Bobina estreita (58mm): no .env troque PRINTER_LARGURA=48
+   por PRINTER_LARGURA=32.
+
+Não saiu nada
+   Confira o óbvio primeiro: tem papel? a tampa está bem fechada?
+   a luz está verde? Depois teste imprimir uma página pelo próprio
+   Windows (Impressoras → clique na sua → Imprimir página de teste).
+
+Quero reimprimir um pedido
+   Me peça, ou no sistema marque o campo "impresso" como falso
+   naquele pedido — ele sai de novo em segundos.
+
+Quero 2 vias (cozinha e entregador)
+   No arquivo .env, troque VIAS=1 por VIAS=2.
+
+
+───────────────────────────────────────────────────────────────
+ IMPORTANTE
+───────────────────────────────────────────────────────────────
+
+O arquivo .env tem a senha de acesso ao sistema.
+Não mande ele por WhatsApp, não copie pra pendrive e não use
+esse notebook em Wi-Fi público.
