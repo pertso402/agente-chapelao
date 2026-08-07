@@ -207,6 +207,27 @@ async function pausarAtendimento(telefone, ms, motivo) {
   if (error) throw new Error(`Supabase/pausarAtendimento: ${error.message}`);
 }
 
+// Libera o atendimento automático imediatamente (não espera o timeout da
+// pausa). Usado quando o atendente marca o alerta como resolvido no painel.
+async function retomarAtendimento(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { error } = await sb.from('agente_pausas').delete().eq('telefone', tel);
+  if (error) throw new Error(`Supabase/retomarAtendimento: ${error.message}`);
+}
+
+// ─── ALERTA DE ATENDIMENTO HUMANO ─────────────────────────────────────────────
+// A IA chama isso quando não sabe responder, tem dúvida real, ou o cliente
+// reclama de algo que ela não resolve sozinha. Aparece no painel (com som)
+// pro atendente assumir a conversa.
+
+async function criarAlertaAtendimento(telefone, nomeCliente, motivo) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { error } = await sb
+    .from('atendimento_alertas')
+    .insert({ telefone: tel, nome_cliente: nomeCliente || null, motivo, status: 'aberto' });
+  if (error) throw new Error(`Supabase/criarAlertaAtendimento: ${error.message}`);
+}
+
 // ─── PRODUTOS / CARDÁPIO ──────────────────────────────────────────────────────
 
 async function buscarProdutos() {
@@ -652,5 +673,6 @@ module.exports = {
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
-  verificarPausa, pausarAtendimento, reivindicarFollowups, reivindicarTravados,
+  verificarPausa, pausarAtendimento, retomarAtendimento, reivindicarFollowups, reivindicarTravados,
+  criarAlertaAtendimento,
 };

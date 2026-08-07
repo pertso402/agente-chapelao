@@ -94,6 +94,20 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'chamar_atendente',
+      description: 'Chama um atendente HUMANO quando você não sabe responder algo, tem dúvida real sobre alguma coisa, ou o cliente reclama de um problema que você não consegue resolver sozinho (pedido anterior errado, demora, produto com defeito, etc). Use com moderação — só quando genuinamente precisar de uma pessoa. Depois de chamar, avise o cliente com tranquilidade e pare de tentar resolver sozinho.',
+      parameters: {
+        type: 'object',
+        properties: {
+          motivo: { type: 'string', description: 'Resumo curto e claro do que o cliente precisa/está reclamando, pra o atendente entender rápido sem reler a conversa toda.' },
+        },
+        required: ['motivo'],
+      },
+    },
+  },
 ];
 
 // ─── EXECUTOR ─────────────────────────────────────────────────────────────────
@@ -226,6 +240,20 @@ async function executarTool(nome, args, contexto = {}) {
       if (!telefone) return 'ERRO: telefone não disponível.';
       const pedido = await db.atualizarStatusPedido(telefone, args.novo_status);
       return JSON.stringify({ sucesso: true, numero_pedido: pedido.numero_pedido, novo_status: args.novo_status });
+    }
+
+    case 'chamar_atendente': {
+      if (!telefone) return 'ERRO: telefone não disponível.';
+      const rascunho = await db.carregarRascunho(telefone);
+      await db.criarAlertaAtendimento(telefone, rascunho?.nome_cliente, args.motivo);
+      // Pausa por até 1h — se o atendente responder, cada mensagem dele estende
+      // a pausa automaticamente (mesmo mecanismo de sempre); se resolver pelo
+      // painel, a pausa é liberada na hora, sem esperar o timeout.
+      await db.pausarAtendimento(telefone, 60 * 60_000, `atendente chamado: ${args.motivo}`);
+      return JSON.stringify({
+        sucesso: true,
+        instrucao: 'Avise o cliente com tranquilidade que um atendente humano vai assumir a conversa em instantes. NÃO tente mais resolver isso sozinho — encerre essa mensagem por aqui.',
+      });
     }
 
     default:
