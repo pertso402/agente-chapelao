@@ -1,77 +1,141 @@
-# Deploy no EasyPanel
+# Deploy — Agente Chapelão v3
 
-## 1. Banco de dados — rodar 1 vez
-No Supabase → SQL Editor, cole e execute o conteúdo de `supabase/agent_logs.sql`.
+O sistema tem **duas partes**:
 
-## 2. No EasyPanel — criar aplicação
-- **Source**: Git repo ou upload do código
+| Parte | Onde roda | Para quê |
+|---|---|---|
+| **Agente** (`src/`) | Nuvem (EasyPanel) | Atende o cliente no WhatsApp e grava o pedido |
+| **Agente de impressão** (`print-agent/`) | PC do restaurante | Imprime o pedido na térmica |
+
+A impressora está na cozinha e o agente roda na nuvem — a nuvem não alcança um
+cabo USB em Umuarama. Por isso a impressão é um serviço separado, na mesma rede
+da impressora. Instruções dele: [`print-agent/README.md`](print-agent/README.md).
+
+---
+
+## 1. Banco de dados — rodar uma vez
+
+No Supabase → SQL Editor, execute **na ordem**:
+
+| Arquivo | O que cria |
+|---|---|
+| `supabase/agent_logs.sql` | Tabela de logs/erros do agente |
+| `supabase/pedido_rascunho.sql` | Estado do pedido entre mensagens |
+| `supabase/atendimento.sql` | Alertas do painel + pausa de 10 min |
+| `supabase/impressao.sql` | Fila de impressão na tabela `pedidos` |
+
+## 2. EasyPanel — criar/atualizar a aplicação
+
+- **Source**: repositório Git
 - **Build**: Dockerfile (detecta automático)
 - **Port**: 3000
 
-## 3. Variáveis de ambiente (adicionar no EasyPanel)
+## 3. Variáveis de ambiente
+
 ```
 SUPA_URL=https://qlswjefuinhbtlhauhgj.supabase.co
 SUPA_KEY=<anon key>
 SUPA_SERVICE_KEY=<service role key>
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
+
+ANTHROPIC_API_KEY=sk-ant-...      # agente Claude Opus 5 + leitura de comprovante
+OPENAI_API_KEY=sk-...             # só transcrição de áudio
+
 EVOLUTION_URL=https://sua-evolution-api.com
 EVOLUTION_KEY=sua-key
 EVOLUTION_INSTANCE=chapelao
+
+TAXA_ENTREGA=11
+PAUSA_ATENDENTE_MIN=10
+TZ_RESTAURANTE=America/Sao_Paulo
+
 PORT=3000
 ```
 
-## 4. Evolution API — configurar webhook
-Na sua instância Evolution API:
+> ⚠️ `ANTHROPIC_API_KEY` é nova nesta versão. Sem ela o agente não sobe.
+> `OPENAI_API_KEY` continua necessária **só** para áudio.
+
+## 4. Evolution API — webhook
+
 ```
-URL do webhook: https://SEU-DOMINIO-EASYPANEL.com/webhook
+URL: https://SEU-DOMINIO-EASYPANEL.com/webhook
 Eventos: messages.upsert
 ```
 
-## 5. Verificar se está funcionando
+## 5. Conferir se subiu
+
 ```
 GET https://SEU-DOMINIO/health
-→ { "status": "ok", "agente": "Chapelão" }
+→ { "status": "ok", "modelo": "claude-opus-5",
+    "vars": { "supa": true, "anthropic": true, "openai": true, "evolution": true } }
+```
+
+Qualquer `false` em `vars` = variável faltando.
+
+---
+
+## Mudar a taxa de entrega
+
+Só existe **um** lugar: a variável `TAXA_ENTREGA` (ou o valor padrão em
+`src/config.js`). Ela alimenta ao mesmo tempo o resumo que o cliente lê, o
+pedido gravado no banco e o cupom impresso — não tem como um mostrar um valor
+e o outro cobrar outro. O campo `taxa_entrega` da tabela `info_restaurante` é
+ignorado de propósito.
+
+Depois de mudar, confirme com:
+
+```bash
+npm run test:precos
 ```
 
 ---
 
-## Onde ver os logs / erros
+## Onde ver logs e erros
 
-### Opção A — EasyPanel (logs em tempo real)
-- Painel EasyPanel → sua app → aba **Logs**
-- Cada linha é JSON estruturado, ex:
-  ```json
-  {"ts":"2025-06-14T10:00:00Z","nivel":"error","etapa":"tool/criar_pedido/erro","mensagem":"Supabase/criarPedido: ...","telefone":"5511999999999","requestId":"a1b2c3d4"}
-  ```
+### EasyPanel (tempo real)
+Painel → sua app → aba **Logs**. Cada linha é JSON:
 
-### Opção B — Supabase (erros persistidos)
-- Dashboard Supabase → **Table Editor → agent_logs**
-- Filtre por `nivel = 'error'` para ver só os erros
-- Cada erro tem: telefone do cliente, etapa onde falhou, mensagem e stack trace
+```json
+{"ts":"2026-08-07T14:00:00Z","nivel":"error","etapa":"pix/valor-divergente",
+ "telefone":"5544...","requestId":"a1b2c3d4"}
+```
 
-### Leitura dos logs
-Cada entrada tem:
-| Campo | Significado |
-|-------|-------------|
-| `requestId` | ID único por mensagem recebida — agrupe por ele para ver o fluxo completo |
-| `etapa` | Onde está no fluxo (ex: `tool/criar_pedido/erro`, `midia/audio/transcrevendo`) |
-| `telefone` | Qual cliente causou o erro |
-| `mensagem` | Descrição do erro |
-| `erro_stack` | Stack trace completo para debug |
+### Supabase (erros persistidos)
+Table Editor → `agent_logs`, filtre por `nivel = 'error'`.
 
-### Fluxo de etapas (em ordem)
+### Painel de atendimento
+Table Editor → `atendimento_alertas` com `status = 'aberto'` — é a fila de
+conversas esperando uma pessoa.
+
+### Etapas do fluxo (em ordem)
 ```
 webhook/recebido
-midia/audio/download        ← só se for áudio
-midia/audio/transcrevendo   ← só se for áudio
-midia/imagem/download       ← só se for imagem
-midia/imagem/analisando     ← só se for imagem
-historico/carregando
+midia/audio            ← só áudio
+midia/imagem           ← só imagem
+estado/ok
+pix/comprovante-recebido   ← comprovante PIX
+pix/valor-divergente       ← comprovante não bateu com o total
+pedido/confirmando-via-SIM
 agente/chamando-claude
-tool/<nome>/               ← uma por tool chamada
-agente/resposta-ok
-whatsapp/enviando
-historico/salvo
+tool/<nome>
+agente/ok
+whatsapp/ok
+atendente/escalado         ← IA passou a conversa para uma pessoa
 ```
-Se o log parar em alguma etapa = erro aconteceu nela.
+
+Log que para numa etapa = erro aconteceu nela.
+
+---
+
+## Rodar local
+
+```bash
+npm install
+copy .env.example .env     # preencha as chaves
+npm run dev
+```
+
+Testes de preço (não precisam de chave nem de internet):
+
+```bash
+npm run test:precos
+```

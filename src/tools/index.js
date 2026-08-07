@@ -1,7 +1,8 @@
 'use strict';
 
 const db = require('../services/supabase');
-const { descreverFaltando, calcularSubtotal, parseItens } = require('../utils/pedido');
+const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho } = require('../utils/pedido');
+const { TAXA_ENTREGA, PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = { 'marmitex': 0, 'combos': 1, 'combo': 1, 'maioneses': 8, 'bebidas': 9 };
@@ -10,102 +11,82 @@ function prioridadeCategoria(cat) {
   return ORDEM_CATEGORIA[k] ?? 5;
 }
 
-// ─── DEFINIÇÃO DAS TOOLS (formato OpenAI function calling) ───────────────────
+// ─── DEFINIÇÃO DAS TOOLS (formato Anthropic Messages API) ────────────────────
 
 const TOOLS = [
   {
-    type: 'function',
-    function: {
-      name: 'buscar_cardapio',
-      description: 'Retorna todos os produtos disponíveis com preços REAIS. Use SEMPRE antes de citar qualquer produto, preço ou quando o cliente quiser pedir. Nunca invente itens.',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
+    name: 'buscar_cardapio',
+    description: 'Retorna todos os produtos disponíveis com preços REAIS. Use SEMPRE antes de citar qualquer produto, preço ou quando o cliente quiser pedir. Nunca invente itens.',
+    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
-    type: 'function',
-    function: {
-      name: 'buscar_itens_do_dia',
-      description: 'Retorna as carnes, base e acompanhamentos disponíveis HOJE na marmitex — a mesma configuração que a cozinha usa no ERP (Porcionamento → Itens do dia). Use sempre que falar de marmitex.',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
+    name: 'buscar_itens_do_dia',
+    description: 'Retorna as carnes, base e acompanhamentos disponíveis HOJE na marmitex — a mesma configuração que a cozinha usa no ERP (Porcionamento → Itens do dia). Use sempre que falar de marmitex.',
+    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
-    type: 'function',
-    function: {
-      name: 'info_restaurante',
-      description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa.',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
+    name: 'info_restaurante',
+    description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa.',
+    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
-    type: 'function',
-    function: {
-      name: 'salvar_dados_pedido',
-      description: 'Salva/atualiza os dados do pedido no rascunho. Chame SEMPRE que coletar qualquer informação (itens, nome, entrega, endereço, pagamento) — pode chamar com um campo só. O retorno diz o que ainda falta e se o pedido está pronto para confirmação. NÃO precisa enviar tudo de uma vez.',
-      parameters: {
-        type: 'object',
-        properties: {
-          nome_cliente:    { type: 'string', description: 'Nome do cliente' },
-          itens:           {
-            type: 'array',
-            description: 'Itens do pedido. Use os NOMES EXATOS do cardápio. O preço será preenchido pelo sistema.',
-            items: {
-              type: 'object',
-              properties: {
-                nome:            { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
-                quantidade:      { type: 'number' },
-                carnes:          { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: carnes escolhidas (máx 2), nomes exatos de buscar_itens_do_dia.' },
-                acompanhamentos: { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: acompanhamentos escolhidos (máx 6), nomes exatos de buscar_itens_do_dia.' },
-              },
-              required: ['nome', 'quantidade'],
+    name: 'salvar_dados_pedido',
+    description: 'Salva/atualiza os dados do pedido no rascunho. Chame SEMPRE que coletar qualquer informação (itens, nome, entrega, endereço, pagamento) — pode chamar com um campo só, ou sem nenhum campo apenas para consultar o estado atual. O retorno diz o que ainda falta e, quando estiver tudo completo, entrega o RESUMO FINAL já pronto para você copiar. NÃO precisa enviar tudo de uma vez.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome_cliente: { type: 'string', description: 'Nome do cliente' },
+        itens: {
+          type: 'array',
+          description: 'Lista COMPLETA dos itens do pedido (substitui a lista anterior inteira, não é acréscimo). Use os NOMES EXATOS do cardápio. O preço é preenchido pelo sistema.',
+          items: {
+            type: 'object',
+            properties: {
+              nome:            { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
+              quantidade:      { type: 'number' },
+              carnes:          { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: carnes escolhidas (máx 2), nomes exatos de buscar_itens_do_dia.' },
+              acompanhamentos: { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: acompanhamentos escolhidos (máx 6), nomes exatos de buscar_itens_do_dia.' },
             },
+            required: ['nome', 'quantidade'],
           },
-          itens_brinde:    {
-            type: 'array',
-            description: 'SÓ use quando o cliente tiver cupom de BRINDE ativo (informado no contexto). São os itens de cortesia que ele escolheu. Use os NOMES EXATOS do cardápio. O sistema zera o preço automaticamente.',
-            items: {
-              type: 'object',
-              properties: {
-                nome:       { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
-                quantidade: { type: 'number' },
-              },
-              required: ['nome', 'quantidade'],
+        },
+        itens_brinde: {
+          type: 'array',
+          description: 'SÓ use quando o cliente tiver cupom de BRINDE ativo (informado no contexto). São os itens de cortesia que ele escolheu. Use os NOMES EXATOS do cardápio. O sistema zera o preço automaticamente.',
+          items: {
+            type: 'object',
+            properties: {
+              nome:       { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
+              quantidade: { type: 'number' },
             },
+            required: ['nome', 'quantidade'],
           },
-          tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
-          endereco:        { type: 'string', description: 'Endereço completo (só se delivery)' },
-          forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
         },
-        required: [],
+        tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
+        endereco:        { type: 'string', description: 'Endereço completo (só se delivery)' },
+        forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
       },
+      required: [],
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'atualizar_status_pedido',
-      description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
-      parameters: {
-        type: 'object',
-        properties: {
-          novo_status: { type: 'string', enum: ['preparando', 'cancelado'] },
-        },
-        required: ['novo_status'],
-      },
+    name: 'atualizar_status_pedido',
+    description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
+    input_schema: {
+      type: 'object',
+      properties: { novo_status: { type: 'string', enum: ['preparando', 'cancelado'] } },
+      required: ['novo_status'],
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'chamar_atendente',
-      description: 'Chama um atendente HUMANO quando você não sabe responder algo, tem dúvida real sobre alguma coisa, ou o cliente reclama de um problema que você não consegue resolver sozinho (pedido anterior errado, demora, produto com defeito, etc). Use com moderação — só quando genuinamente precisar de uma pessoa. Depois de chamar, avise o cliente com tranquilidade e pare de tentar resolver sozinho.',
-      parameters: {
-        type: 'object',
-        properties: {
-          motivo: { type: 'string', description: 'Resumo curto e claro do que o cliente precisa/está reclamando, pra o atendente entender rápido sem reler a conversa toda.' },
-        },
-        required: ['motivo'],
+    name: 'chamar_atendente',
+    description: 'Chama um atendente HUMANO. Use SEMPRE que: você não souber responder algo com certeza; tiver qualquer dúvida real sobre o que fazer; o cliente pedir algo fora do fluxo normal (alterar pedido já fechado, cancelar, reclamar, negociar preço/desconto, pedir nota fiscal, perguntar sobre pedido anterior); ou acontecer qualquer coisa que você não consiga resolver sozinho com as outras tools. Na dúvida entre chutar e chamar — CHAME. O sistema cria um alerta no painel e pausa seu atendimento por 10 minutos para o atendente assumir.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        motivo: { type: 'string', description: 'Resumo curto e claro do que o cliente precisa/está reclamando, pra o atendente entender rápido sem reler a conversa toda.' },
       },
+      required: ['motivo'],
     },
   },
 ];
@@ -113,7 +94,7 @@ const TOOLS = [
 // ─── EXECUTOR ─────────────────────────────────────────────────────────────────
 
 async function executarTool(nome, args, contexto = {}) {
-  const { telefone } = contexto;
+  const { telefone, ofertaAtiva } = contexto;
 
   switch (nome) {
 
@@ -137,7 +118,7 @@ async function executarTool(nome, args, contexto = {}) {
         txt += `*${cat}*\n`;
         for (const p of cats[cat]) {
           const preco = db.precoFinal(p);
-          txt += `🔸 ${p.nome.trim()} — R$ ${Number(preco).toFixed(2).replace('.', ',')}\n`;
+          txt += `🔸 ${p.nome.trim()} — ${fmtBRL(preco)}\n`;
         }
         txt += '\n';
       }
@@ -172,7 +153,9 @@ async function executarTool(nome, args, contexto = {}) {
         chave_pix: info.chave_pix || '',
         horario: info.horario || 'Seg a Sáb, 11h às 14h',
         loja_aberta: String(info.loja_aberta) !== 'false',
-        taxa_entrega_reais: Number(info.taxa_entrega || 5),
+        // Taxa vem de src/config.js — valor fixo e único do sistema. O campo
+        // taxa_entrega do banco é ignorado de propósito.
+        taxa_entrega_reais: TAXA_ENTREGA,
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
       });
     }
@@ -188,36 +171,37 @@ async function executarTool(nome, args, contexto = {}) {
       if (args.endereco)        campos.endereco        = args.endereco;
       if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
 
-      if (!Object.keys(campos).length) {
-        return 'Nada para salvar. Envie pelo menos um campo (itens, nome_cliente, tipo_entrega, endereco ou forma_pagamento).';
+      // Chamada sem nenhum campo é legítima: é assim que o agente pede o
+      // RESUMO_FINAL_TEXTO_EXATO quando o pedido já estava completo antes
+      // desta mensagem (ex.: cliente disse "e aí, quanto ficou?").
+      let rascunho, avaliacao, naoEncontrados = [], avisos = [];
+      if (Object.keys(campos).length) {
+        ({ rascunho, avaliacao, naoEncontrados, avisos } = await db.atualizarRascunho(telefone, campos));
+      } else {
+        rascunho = await db.carregarRascunho(telefone);
+        if (!rascunho) {
+          return 'Nenhum pedido em andamento e nenhum campo enviado. Comece coletando os itens com o cliente.';
+        }
+        avaliacao = avaliarRascunho(rascunho);
       }
-
-      const { rascunho, avaliacao, naoEncontrados, avisos } = await db.atualizarRascunho(telefone, campos);
 
       const itens = parseItens(rascunho.itens);
-      const subtotal = calcularSubtotal(itens);
+      const brindes = parseItens(rascunho.itens_brinde);
 
       // Primeiro sinal real de interesse (carrinho montado) — alimenta a tag do cliente
-      if (itens.length) {
-        db.marcarInteresse(telefone).catch(() => {});
-      }
-
-      const brindes = parseItens(rascunho.itens_brinde);
+      if (itens.length) db.marcarInteresse(telefone).catch(() => {});
 
       const resumo = {
         salvo: true,
-        itens: itens.map(i => `${i.quantidade}x ${i.nome}${i.observacao ? ` (${i.observacao})` : ''} (R$ ${Number(i.preco_unitario).toFixed(2)})`),
+        itens: itens.map(i => `${i.quantidade}x ${i.nome}${i.observacao ? ` (${i.observacao})` : ''} (${fmtBRL(i.preco_unitario)} cada)`),
         brindes: brindes.length ? brindes.map(b => `${b.quantidade}x ${b.nome} (cortesia)`) : undefined,
-        subtotal_itens: `R$ ${subtotal.toFixed(2)}`,
         nome: rascunho.nome_cliente || null,
         tipo_entrega: rascunho.tipo_entrega || null,
         endereco: rascunho.endereco || null,
         forma_pagamento: rascunho.forma_pagamento || null,
       };
 
-      if (avisos?.length) {
-        resumo.AVISOS = avisos;
-      }
+      if (avisos?.length) resumo.AVISOS = avisos;
 
       if (naoEncontrados.length) {
         resumo.ATENCAO_itens_nao_encontrados = naoEncontrados;
@@ -225,12 +209,39 @@ async function executarTool(nome, args, contexto = {}) {
       }
 
       if (avaliacao.completo) {
+        // O SISTEMA calcula os totais e RENDERIZA o resumo. A LLM não faz conta
+        // nem monta esse texto — ela copia. É a mesma função de precificação
+        // usada para gravar o pedido depois do SIM, então resumo e pedido
+        // confirmado não têm como divergir em nenhum centavo.
+        const p = await db.precificarPedido({
+          itens: rascunho.itens,
+          itensBrinde: rascunho.itens_brinde,
+          tipoEntrega: rascunho.tipo_entrega,
+          cupom: ofertaAtiva || null,
+        });
+
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';
-        resumo.instrucao_final = 'Todos os dados foram coletados. Apresente o RESUMO FINAL e peça para o cliente responder *SIM* para confirmar. O SISTEMA criará o pedido automaticamente — você NÃO deve criar.';
+        resumo.subtotal = fmtBRL(p.subtotal);
+        resumo.taxa_entrega = fmtBRL(p.taxaEntrega);
+        resumo.desconto = fmtBRL(p.desconto);
+        resumo.total = fmtBRL(p.total);
+        resumo.RESUMO_FINAL_TEXTO_EXATO = montarResumoFinal({
+          itens: p.itens,
+          brindes: p.brindes,
+          tipoEntrega: rascunho.tipo_entrega,
+          endereco: rascunho.endereco,
+          formaPagamento: rascunho.forma_pagamento,
+          totais: p,
+          cupomCodigo: ofertaAtiva?.codigo,
+        });
+        resumo.instrucao_final =
+          'ENVIE O CAMPO RESUMO_FINAL_TEXTO_EXATO COMO SUA RESPOSTA, LETRA POR LETRA, ' +
+          'SEM REESCREVER, SEM RECALCULAR NENHUM VALOR, SEM ACRESCENTAR NEM REMOVER LINHAS. ' +
+          'Não escreva mais nada antes nem depois. O SISTEMA cria o pedido quando o cliente responder SIM — você NÃO cria.';
       } else {
         resumo.status = 'FALTA_COLETAR';
         resumo.falta = descreverFaltando(avaliacao.faltando);
-        resumo.instrucao_final = `Ainda falta coletar: ${descreverFaltando(avaliacao.faltando)}. Continue a conversa naturalmente para obter isso.`;
+        resumo.instrucao_final = `Ainda falta coletar: ${descreverFaltando(avaliacao.faltando)}. Continue a conversa naturalmente para obter isso. NÃO apresente resumo nem total agora.`;
       }
 
       return JSON.stringify(resumo);
@@ -246,13 +257,13 @@ async function executarTool(nome, args, contexto = {}) {
       if (!telefone) return 'ERRO: telefone não disponível.';
       const rascunho = await db.carregarRascunho(telefone);
       await db.criarAlertaAtendimento(telefone, rascunho?.nome_cliente, args.motivo);
-      // Pausa por até 1h — se o atendente responder, cada mensagem dele estende
-      // a pausa automaticamente (mesmo mecanismo de sempre); se resolver pelo
-      // painel, a pausa é liberada na hora, sem esperar o timeout.
-      await db.pausarAtendimento(telefone, 60 * 60_000, `atendente chamado: ${args.motivo}`);
+      // Pausa de 10 minutos: tempo do atendente ver o alerta e assumir. Se ele
+      // responder pelo WhatsApp, cada mensagem estende a pausa; se resolver
+      // pelo painel, a pausa é liberada na hora, sem esperar o timeout.
+      await db.pausarAtendimento(telefone, PAUSA_ATENDENTE_MS, `atendente chamado: ${args.motivo}`);
       return JSON.stringify({
         sucesso: true,
-        instrucao: 'Avise o cliente com tranquilidade que um atendente humano vai assumir a conversa em instantes. NÃO tente mais resolver isso sozinho — encerre essa mensagem por aqui.',
+        instrucao: 'Avise o cliente, com tranquilidade e em UMA frase curta, que um atendente humano vai assumir a conversa em instantes. NÃO tente mais resolver isso sozinho, não faça perguntas e não continue o pedido — encerre sua resposta por aqui.',
       });
     }
 

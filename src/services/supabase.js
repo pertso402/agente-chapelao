@@ -2,7 +2,8 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
-const { normalizar, parseItens, avaliarRascunho, calcularSubtotal } = require('../utils/pedido');
+const { normalizar, parseItens, avaliarRascunho, calcularSubtotal, calcularTotais } = require('../utils/pedido');
+const { TAXA_ENTREGA, hojeLocal, money } = require('../config');
 const logger = require('../logger');
 
 const sb = createClient(
@@ -333,7 +334,9 @@ async function validarItens(itensInput) {
 // cai pro último dia configurado (mesma regra de fallback do ERP), pra nunca
 // informar o cardápio errado nem ficar sem resposta.
 async function buscarItensDoDia() {
-  const hoje = new Date().toISOString().slice(0, 10);
+  // Data no fuso do restaurante, não em UTC: das 21h à meia-noite o
+  // toISOString() já apontava para o dia seguinte e trazia o cardápio errado.
+  const hoje = hojeLocal();
 
   let { data: rows, error } = await sb
     .from('itens_do_dia')
@@ -385,10 +388,11 @@ async function buscarInfo() {
   return info;
 }
 
-async function getTaxaEntrega() {
-  const info = await buscarInfo();
-  const t = Number(info.taxa_entrega);
-  return Number.isFinite(t) ? t : 5;
+// Taxa de entrega é FIXA e vem de src/config.js — nunca do banco. Ter duas
+// origens (config + info_restaurante) foi a causa raiz do resumo mostrar um
+// valor e o pedido confirmado outro.
+function getTaxaEntrega() {
+  return TAXA_ENTREGA;
 }
 
 // ─── CLIENTES ─────────────────────────────────────────────────────────────────
@@ -477,7 +481,7 @@ async function buscarCupomAtivoPorTelefone(telefone) {
   const { data: cliente } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
   if (!cliente) return null;
 
-  const hoje = new Date().toISOString().slice(0, 10);
+  const hoje = hojeLocal();
   const { data: cupom, error } = await sb
     .from('cupons')
     .select('id, codigo, desconto_percentual, valido_ate, usado, cliente_id, tipo, descricao, itens_permitidos')
@@ -511,10 +515,16 @@ async function darBaixaCupom(cupomId, pedidoId) {
   if (errOferta) throw new Error(`Supabase/marcarOfertaConvertida: ${errOferta.message}`);
 }
 
-// ─── PEDIDOS ──────────────────────────────────────────────────────────────────
+// ─── PRECIFICAÇÃO (fonte única) ───────────────────────────────────────────────
+// Chamada em DOIS momentos: quando o agente monta o resumo "Confira seu pedido"
+// e quando o SISTEMA cria o pedido após o SIM. Como os dois passam por aqui,
+// é impossível o resumo mostrar um total e o pedido gravar outro — que era
+// exatamente o bug da taxa de entrega (R$ 5 no resumo, R$ 10 no confirmado).
+//
+// Repreça sempre a partir do catálogo FRESCO por produto_id: não confia no
+// preço cacheado no rascunho, que pode ter envelhecido durante a conversa.
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom, itensBrinde }) {
-  const tel = String(telefone).replace(/\D/g, '');
+async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom }) {
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
 
@@ -540,9 +550,6 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     listaBrinde = listaBrinde.filter(b => alvos.includes(normalizar(b.nome)));
   }
 
-  // Última camada defensiva: resolve preço FRESCO por produto_id (não confia
-  // no preço cacheado no rascunho, que pode ter ficado desatualizado se o
-  // cardápio mudou durante a conversa). Se o produto sumiu, erro claro.
   const catalogo = await buscarProdutos();
   const listaRepreçada = listaItens.map(i => {
     const prod = catalogo.find(p => p.id === i.produto_id);
@@ -550,14 +557,19 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     return { ...i, preco_unitario: precoFinal(prod) };
   });
 
-  const subtotal = calcularSubtotal(listaRepreçada);
-  const taxaConfig = await getTaxaEntrega();
-  const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
-  // Cupom de brinde não abate percentual — o benefício são os itens grátis.
-  const desconto = cupom && !cupomEhBrinde
-    ? parseFloat((subtotal * (Number(cupom.desconto_percentual) / 100)).toFixed(2))
-    : 0;
-  const total = parseFloat((subtotal + taxaEntrega - desconto).toFixed(2));
+  const totais = calcularTotais({ itens: listaRepreçada, tipoEntrega, cupom });
+  return { itens: listaRepreçada, brindes: listaBrinde, ...totais };
+}
+
+// ─── PEDIDOS ──────────────────────────────────────────────────────────────────
+
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom, itensBrinde }) {
+  const tel = String(telefone).replace(/\D/g, '');
+
+  const {
+    itens: listaRepreçada, brindes: listaBrinde,
+    subtotal, taxaEntrega, desconto, total,
+  } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom });
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
   const canal = cliente.veio_de_anuncio ? 'whatsapp_anuncio' : 'whatsapp_organico';
@@ -589,7 +601,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     quantidade: Number(i.quantidade),
     preco_unitario: Number(i.preco_unitario),
     observacao: i.observacao || null,
-    total: parseFloat((Number(i.preco_unitario) * Number(i.quantidade)).toFixed(2)),
+    total: money(Number(i.preco_unitario) * Number(i.quantidade)),
   }));
 
   // Itens de cortesia entram no pedido zerados, pra cozinha ver que tem que
@@ -644,7 +656,9 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   };
 }
 
-async function atualizarStatusPedido(telefone, novoStatus) {
+// Último pedido ainda pendente do cliente. Usado para conferir o VALOR do
+// comprovante PIX contra o total real antes de liberar pra cozinha.
+async function buscarPedidoPendente(telefone) {
   const tel = String(telefone).replace(/\D/g, '');
 
   const { data: cli } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
@@ -660,7 +674,12 @@ async function atualizarStatusPedido(telefone, novoStatus) {
   if (error) throw new Error(`Supabase/buscarPedidoPendente: ${error.message}`);
   if (!pedidos?.length) throw new Error('Nenhum pedido pendente encontrado para este cliente.');
 
-  const pedido = pedidos[0];
+  return pedidos[0];
+}
+
+async function atualizarStatusPedido(telefone, novoStatus) {
+  const pedido = await buscarPedidoPendente(telefone);
+
   const { error: uErr } = await sb.from('pedidos').update({ status: novoStatus }).eq('id', pedido.id);
   if (uErr) throw new Error(`Supabase/atualizarStatus: ${uErr.message}`);
 
@@ -671,7 +690,9 @@ module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
-  garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
+  precificarPedido,
+  garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
+  atualizarStatusPedido, buscarPedidoPendente,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
   verificarPausa, pausarAtendimento, retomarAtendimento, reivindicarFollowups, reivindicarTravados,
   criarAlertaAtendimento,

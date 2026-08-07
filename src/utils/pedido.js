@@ -2,7 +2,10 @@
 
 // ─── LÓGICA DE DOMÍNIO PURA DO PEDIDO ─────────────────────────────────────────
 // Sem acesso a banco. Funções determinísticas usadas para decidir o estado
-// do pedido. O CÓDIGO (não a LLM) é a fonte da verdade sobre o que falta.
+// do pedido E para calcular/renderizar o dinheiro. O CÓDIGO (não a LLM) é a
+// fonte da verdade sobre o que falta e sobre quanto custa.
+
+const { TAXA_ENTREGA, fmtBRL, money } = require('../config');
 
 function normalizar(s) {
   return String(s || '')
@@ -56,10 +59,74 @@ function descreverFaltando(faltando) {
 }
 
 function calcularSubtotal(itens) {
-  return parseItens(itens).reduce(
+  return money(parseItens(itens).reduce(
     (s, i) => s + Number(i.preco_unitario || 0) * Number(i.quantidade || 0),
     0
-  );
+  ));
 }
 
-module.exports = { normalizar, parseItens, avaliarRascunho, descreverFaltando, calcularSubtotal, LABEL_FALTANDO };
+// ─── DINHEIRO: UM ÚNICO CAMINHO DE CÁLCULO ────────────────────────────────────
+// Chamada tanto na hora de MOSTRAR o resumo quanto na hora de CRIAR o pedido.
+// Enquanto as duas telas passarem por aqui, é impossível divergirem.
+
+function calcularTotais({ itens, tipoEntrega, cupom }) {
+  const subtotal = calcularSubtotal(itens);
+  const taxaEntrega = tipoEntrega === 'delivery' ? money(TAXA_ENTREGA) : 0;
+
+  // Cupom de brinde não abate percentual — o benefício são os itens grátis.
+  const ehBrinde = cupom?.tipo === 'brinde';
+  const desconto = cupom && !ehBrinde
+    ? money(subtotal * (Number(cupom.desconto_percentual) / 100))
+    : 0;
+
+  const total = money(subtotal + taxaEntrega - desconto);
+  return { subtotal, taxaEntrega, desconto, total };
+}
+
+// ─── RESUMO FINAL (texto pronto pro WhatsApp) ─────────────────────────────────
+// A LLM NÃO monta mais esse texto: ela recebe esta string pronta e repassa
+// caractere por caractere. Foi montar o resumo "de cabeça" que produziu a
+// taxa de R$ 5,00 no resumo e R$ 10,00 no pedido confirmado.
+
+function linhaItem(i) {
+  const qtd = Number(i.quantidade) || 1;
+  const totalItem = money(Number(i.preco_unitario || 0) * qtd);
+  const obs = i.observacao ? `\n   _${i.observacao}_` : '';
+  return `🍱 ${qtd}x ${i.nome} — ${fmtBRL(totalItem)}${obs}`;
+}
+
+function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamento, totais, cupomCodigo }) {
+  const linhas = [];
+  linhas.push('🎩 *Confira seu pedido:*');
+  linhas.push('');
+
+  for (const i of parseItens(itens)) linhas.push(linhaItem(i));
+  for (const b of parseItens(brindes)) {
+    linhas.push(`🎁 ${Number(b.quantidade) || 1}x ${b.nome} — *cortesia*`);
+  }
+
+  linhas.push('');
+  linhas.push(tipoEntrega === 'delivery'
+    ? `📍 Entrega: ${endereco}`
+    : '📍 Retirada no local');
+  linhas.push(`💳 Pagamento: ${rotuloPagamento(formaPagamento)}`);
+  linhas.push('');
+  linhas.push(`🛍️ Subtotal: ${fmtBRL(totais.subtotal)}`);
+  if (totais.taxaEntrega > 0) linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
+  if (totais.desconto > 0)    linhas.push(`🏷️ Desconto${cupomCodigo ? ` (${cupomCodigo})` : ''}: -${fmtBRL(totais.desconto)}`);
+  linhas.push(`💰 *Total: ${fmtBRL(totais.total)}*`);
+  linhas.push('');
+  linhas.push('_Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._');
+
+  return linhas.join('\n');
+}
+
+const ROTULO_PAGAMENTO = { pix: 'PIX', dinheiro: 'Dinheiro', cartao: 'Cartão' };
+function rotuloPagamento(f) {
+  return ROTULO_PAGAMENTO[String(f || '').toLowerCase()] || f || '—';
+}
+
+module.exports = {
+  normalizar, parseItens, avaliarRascunho, descreverFaltando, calcularSubtotal,
+  calcularTotais, montarResumoFinal, rotuloPagamento, LABEL_FALTANDO,
+};

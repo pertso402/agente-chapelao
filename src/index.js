@@ -10,19 +10,20 @@ const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho,
-  buscarInfo, atualizarStatusPedido,
+  buscarInfo, atualizarStatusPedido, buscarPedidoPendente,
   buscarCupomAtivoPorTelefone,
-  garantirCliente, verificarPausa, pausarAtendimento,
+  garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
   reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido, gerarFollowup } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
+const { PAUSA_ATENDENTE_MS, fmtBRL, MODEL_AGENTE } = require('./config');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+const fmt = fmtBRL;
 
 // ─── RESPOSTA CENTRAL ──────────────────────────────────────────────────────────
 // Todo texto que sai do bot passa por aqui: envia, salva no histórico e stampa
@@ -41,6 +42,33 @@ async function responder(telefone, texto, { requestId, etapa }) {
     ultima_msg_role: 'assistant',
   }).catch(err => logger.warn('rascunho/stamp-assistant-falhou', err.message, { requestId, telefone }));
 }
+
+// ─── ESCALONAMENTO PARA ATENDENTE HUMANO ──────────────────────────────────────
+// Caminho único para "a IA não dá conta disso": alerta no painel (com som, pro
+// atendente ver na hora) + atendimento pausado por 10 minutos + uma mensagem
+// honesta pro cliente. Usado tanto pela tool chamar_atendente quanto por
+// qualquer falha técnica — erro de banco, modelo fora do ar, comprovante
+// ilegível. Antes, uma falha dessas virava "tenta de novo em instantes" e o
+// cliente ficava conversando com um agente quebrado, sem ninguém saber.
+async function escalarParaAtendente(telefone, motivo, requestId, { mensagemCliente } = {}) {
+  try {
+    const rascunho = await carregarRascunho(telefone).catch(() => null);
+    await criarAlertaAtendimento(telefone, rascunho?.nome_cliente, motivo);
+    await pausarAtendimento(telefone, PAUSA_ATENDENTE_MS, motivo);
+    logger.warn('atendente/escalado', motivo, { requestId, telefone, pausa_min: PAUSA_ATENDENTE_MS / 60000 });
+  } catch (err) {
+    // Se nem o alerta consegue ser gravado, ainda assim avisamos o cliente —
+    // ficar mudo é o pior desfecho possível.
+    logger.error('atendente/escalar-falhou', err.message, { requestId, telefone, stack: err.stack });
+  }
+
+  if (mensagemCliente) {
+    await responder(telefone, mensagemCliente, { requestId, etapa: 'escalarAtendente' }).catch(() => {});
+  }
+}
+
+const MSG_ATENDENTE_PADRAO =
+  'Opa, deixa eu chamar alguém da equipe pra te ajudar com isso 🙋 Um atendente assume nossa conversa em instantes, tá? 🎩';
 
 // ─── FILA POR TELEFONE ─────────────────────────────────────────────────────────
 // Evita que 2+ mensagens do MESMO cliente, chegando rápido uma atrás da outra
@@ -117,8 +145,10 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     ts: new Date().toISOString(),
     agente: 'Chapelão v2',
+    modelo: MODEL_AGENTE,
     vars: {
       supa: !!process.env.SUPA_URL,
+      anthropic: !!process.env.ANTHROPIC_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
       evolution: !!process.env.EVOLUTION_URL,
     },
@@ -151,9 +181,9 @@ app.post('/webhook', async (req, res) => {
   if (msg.fromMe) {
     if (ehEcoDoBot(msg.telefone, msg.msgId)) return; // eco da nossa própria resposta, ignora
     try {
-      await pausarAtendimento(msg.telefone, 10 * 60_000, 'atendente humano respondeu');
-      logger.info('pausa/atendente-humano', 'Atendente respondeu, pausando IA conversacional por 10min', {
-        requestId, telefone: msg.telefone,
+      await pausarAtendimento(msg.telefone, PAUSA_ATENDENTE_MS, 'atendente humano respondeu');
+      logger.info('pausa/atendente-humano', 'Atendente respondeu, pausando IA conversacional', {
+        requestId, telefone: msg.telefone, pausa_min: PAUSA_ATENDENTE_MS / 60000,
       });
     } catch (err) {
       logger.error('pausa/erro', err.message, { requestId, telefone: msg.telefone, stack: err.stack });
@@ -178,31 +208,64 @@ async function processarMensagem(msg, requestId) {
     // ── Mídia: áudio ───────────────────────────────────────────────────────
     if (tipo === 'audioMessage') {
       logger.step(requestId, telefone, 'midia/audio');
-      let b64 = base64Inline, mime = mimetypeInline || 'audio/ogg';
-      if (!b64) {
-        const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
-        b64 = m.base64; mime = m.mimetype || 'audio/ogg';
+      try {
+        let b64 = base64Inline, mime = mimetypeInline || 'audio/ogg';
+        if (!b64) {
+          const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
+          b64 = m.base64; mime = m.mimetype || 'audio/ogg';
+        }
+        const transcricao = await comRetry(() => transcreverAudio(b64, mime), { tentativas: 2, requestId, etapa: 'transcricao' });
+        conteudo = `🎙️ [Áudio]: ${transcricao}`;
+        logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
+      } catch (err) {
+        // Não dá pra "adivinhar" o que o cliente falou. Sem transcrição, quem
+        // assume é gente — pedir pra repetir num loop infinito é pior.
+        logger.error('midia/audio/erro', err.message, { requestId, telefone, stack: err.stack });
+        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Não consegui transcrever o áudio do cliente: ${err.message}`, requestId, {
+          mensagemCliente: 'Recebi seu áudio, mas não consegui escutar direito aqui 😕 Já chamei um atendente pra te ajudar — ele assume em instantes. Se preferir, pode me mandar por escrito também!',
+        });
+        return;
       }
-      const transcricao = await comRetry(() => transcreverAudio(b64, mime), { tentativas: 2, requestId, etapa: 'whisper' });
-      conteudo = `🎙️ [Áudio]: ${transcricao}`;
-      logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
     }
 
     // ── Mídia: imagem ──────────────────────────────────────────────────────
     let isComprovante = false;
+    let comprovanteValor = null;
     if (tipo === 'imageMessage') {
       logger.step(requestId, telefone, 'midia/imagem');
-      let b64 = base64Inline, mime = mimetypeInline || 'image/jpeg';
-      if (!b64) {
-        const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
-        b64 = m.base64; mime = m.mimetype || 'image/jpeg';
+      try {
+        let b64 = base64Inline, mime = mimetypeInline || 'image/jpeg';
+        if (!b64) {
+          const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
+          b64 = m.base64; mime = m.mimetype || 'image/jpeg';
+        }
+        const r = await comRetry(() => analisarImagem(b64, mime), { tentativas: 2, requestId, etapa: 'visao' });
+        isComprovante = r.isComprovante;
+        comprovanteValor = r.valor;
+
+        // Parece comprovante mas a leitura não foi confiável (foto borrada,
+        // cortada, "agendado"). Nunca liberar pedido nessas condições.
+        if (r.comprovanteDuvidoso) {
+          logger.warn('midia/comprovante-duvidoso', 'Comprovante com leitura incerta', {
+            requestId, telefone, confianca: r.confianca, valor: r.valor,
+          });
+          await escalarParaAtendente(telefone, `💸 [COMPROVANTE ILEGÍVEL] Cliente enviou comprovante que não deu pra ler com segurança (confiança: ${r.confianca}). Conferir manualmente. Leitura parcial: ${r.analise}`, requestId, {
+            mensagemCliente: 'Recebi seu comprovante! 📎 Só que a imagem ficou meio difícil de ler aqui — vou pedir pra alguém da equipe conferir pra não ter erro. É rapidinho! 🙏',
+          });
+          return;
+        }
+
+        conteudo = isComprovante
+          ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
+          : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
+        logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante, valor: r.valor, confianca: r.confianca });
+      } catch (err) {
+        logger.error('midia/imagem/erro', err.message, { requestId, telefone, stack: err.stack });
+        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Falha ao analisar imagem enviada pelo cliente: ${err.message}`, requestId, {
+          mensagemCliente: 'Recebi sua imagem, mas tive um problema pra abrir ela aqui 😕 Já chamei um atendente pra conferir — ele assume em instantes.',
+        });
+        return;
       }
-      const r = await comRetry(() => analisarImagem(b64, mime), { tentativas: 2, requestId, etapa: 'gptVision' });
-      isComprovante = r.isComprovante;
-      conteudo = isComprovante
-        ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
-        : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
-      logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante });
     }
 
     // ── Localização (fixa ou em tempo real) ──────────────────────────────────
@@ -259,6 +322,25 @@ async function processarMensagem(msg, requestId) {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
       const pararDigitando = manterDigitando(telefone);
       try {
+        // Confere o VALOR antes de liberar. Um comprovante legítimo de R$ 20
+        // num pedido de R$ 68 é um pagamento parcial — ou o print de outra
+        // compra. Liberar isso pra cozinha é prejuízo direto.
+        const pendente = await buscarPedidoPendente(telefone);
+        const diferenca = comprovanteValor == null ? null : Math.round((comprovanteValor - pendente.total) * 100) / 100;
+
+        if (diferenca === null || Math.abs(diferenca) > 0.01) {
+          logger.warn('pix/valor-divergente', 'Valor do comprovante não bate com o pedido', {
+            requestId, telefone, valor_comprovante: comprovanteValor, total_pedido: pendente.total, diferenca,
+          });
+          await escalarParaAtendente(
+            telefone,
+            `💸 [PIX DIVERGENTE] Pedido #${pendente.numero_pedido}: total ${fmt(pendente.total)}, comprovante ${comprovanteValor == null ? 'sem valor legível' : fmt(comprovanteValor)}${diferenca != null ? ` (diferença ${fmt(diferenca)})` : ''}. Conferir antes de liberar.`,
+            requestId,
+            { mensagemCliente: `Recebi seu comprovante! 📎 Só que o valor não bateu certinho com o total do pedido *#${pendente.numero_pedido}* (${fmt(pendente.total)}), então vou pedir pra alguém da equipe conferir antes de mandar pra cozinha. Já já te falo! 🙏` },
+          );
+          return;
+        }
+
         const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'preparando'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
         await limparRascunho(telefone);
@@ -267,8 +349,9 @@ async function processarMensagem(msg, requestId) {
         return;
       } catch (err) {
         logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
-        const txt = 'Recebi seu comprovante, mas tive um problema técnico pra confirmar automaticamente 😅 Nossa equipe vai conferir e liberar seu pedido manualmente em instantes.';
-        await responder(telefone, txt, { requestId, etapa: 'pixErroHonesto' }).catch(() => {});
+        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Falha ao confirmar comprovante PIX: ${err.message}`, requestId, {
+          mensagemCliente: 'Recebi seu comprovante, mas tive um problema técnico pra confirmar automaticamente 😅 Já avisei a equipe — alguém confere e libera seu pedido em instantes.',
+        });
         return;
       } finally {
         pararDigitando();
@@ -313,10 +396,20 @@ async function processarMensagem(msg, requestId) {
           return;
         }
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
-        const falta = err.faltando?.length
-          ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
-          : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
-        await responder(telefone, `Opa! ${falta}`, { requestId, etapa: 'confirmarErro' }).catch(() => {});
+
+        if (err.faltando?.length) {
+          // Falta dado: é conversa normal, o agente completa na próxima volta.
+          await responder(telefone, `Opa! Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`,
+            { requestId, etapa: 'confirmarErro' }).catch(() => {});
+          return;
+        }
+
+        // Qualquer outra falha aqui é técnica (banco fora, produto sumiu do
+        // cardápio no meio da conversa). O cliente já disse SIM e está
+        // esperando o pedido — isso não pode morrer num log.
+        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Falha ao fechar o pedido depois do SIM do cliente: ${err.message}`, requestId, {
+          mensagemCliente: 'Opa! Tive um problema técnico bem na hora de fechar seu pedido 😔 Já chamei um atendente pra finalizar isso com você agora mesmo — seus dados estão salvos, não precisa repetir nada.',
+        });
         return;
       } finally {
         pararDigitando();
@@ -333,25 +426,38 @@ async function processarMensagem(msg, requestId) {
     const pararDigitandoAgente = manterDigitando(telefone);
     try {
       const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-      const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
+      const { texto, atendenteChamado } = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
 
-      if (!resposta) {
+      if (!texto) {
+        // Resposta vazia é sintoma de algo errado (raciocínio consumiu todo o
+        // orçamento, tool travou). Pedir "pode repetir?" só empurra o problema.
         logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
-        await responder(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?', { requestId, etapa: 'respostaVazia' });
+        await escalarParaAtendente(telefone, '🤖 [ERRO TÉCNICO] O agente não produziu resposta para a mensagem do cliente.', requestId, {
+          mensagemCliente: MSG_ATENDENTE_PADRAO,
+        });
         return;
       }
 
-      await responder(telefone, resposta, { requestId, etapa: 'enviarResposta' });
-      logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
+      await responder(telefone, texto, { requestId, etapa: 'enviarResposta' });
+      logger.info('whatsapp/ok', 'Resposta enviada', {
+        requestId, telefone, chars: texto.length, atendente_chamado: atendenteChamado,
+      });
     } finally {
       pararDigitandoAgente();
     }
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
-    try {
-      await responder(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!', { requestId, etapa: 'erroGeral' });
-    } catch {}
+    // Toda falha não tratada vira alerta no painel + pausa. O cliente nunca
+    // fica falando sozinho com um agente quebrado.
+    await escalarParaAtendente(
+      telefone,
+      err.precisaAtendente
+        ? `🤖 [AGENTE TRAVADO] ${err.precisaAtendente}`
+        : `🤖 [ERRO TÉCNICO] ${err.message}`,
+      requestId,
+      { mensagemCliente: MSG_ATENDENTE_PADRAO },
+    ).catch(() => {});
   }
 }
 
@@ -387,9 +493,19 @@ async function pollarFollowups() {
 async function pollarTravados() {
   const travados = await reivindicarTravados(TRAVADO_WATCHDOG_MS);
   for (const r of travados) {
+    const requestId = uuid().slice(0, 8);
     logger.error('watchdog/rascunho-travado',
       'Rascunho preso em "processando" — possível pedido não finalizado, verificar manualmente com o cliente',
-      { telefone: r.telefone, nome_cliente: r.nome_cliente, itens: r.itens, updated_at: r.updated_at });
+      { requestId, telefone: r.telefone, nome_cliente: r.nome_cliente, itens: r.itens, updated_at: r.updated_at });
+
+    // O processo pode ter morrido entre a trava e o fim de criarPedidoCompleto:
+    // não dá pra recriar sozinho (duplicaria o pedido), então quem decide é uma
+    // pessoa. Antes isso só ia pro log e ninguém via.
+    await escalarParaAtendente(
+      r.telefone,
+      `⚠️ [PEDIDO TRAVADO] Cliente disse SIM mas o pedido ficou preso em "processando" desde ${r.updated_at}. Verificar no ERP se o pedido foi criado antes de refazer com o cliente.`,
+      requestId,
+    ).catch(() => {});
   }
 }
 
@@ -414,8 +530,10 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info('servidor/start', `🎩 Agente Chapelão rodando na porta ${PORT}`, {
     port: PORT,
-    supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
-    openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
-    evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
+    modelo:    MODEL_AGENTE,
+    supa_url:  process.env.SUPA_URL          ? '✓' : '✗ FALTANDO',
+    anthropic: process.env.ANTHROPIC_API_KEY ? '✓' : '✗ FALTANDO (agente + visão)',
+    openai:    process.env.OPENAI_API_KEY    ? '✓' : '✗ FALTANDO (transcrição de áudio)',
+    evolution: process.env.EVOLUTION_URL     ? '✓' : '✗ FALTANDO',
   });
 });
