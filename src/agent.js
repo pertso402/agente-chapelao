@@ -155,19 +155,100 @@ Este cliente recebeu uma mensagem de recompra com o cupom *${ofertaAtiva.codigo}
 }
 
 // ─── CHAMADA AO MODELO ────────────────────────────────────────────────────────
+// Rede de segurança de implantação: se a conta ainda não tiver acesso ao
+// modelo configurado (ou se o parâmetro reasoning_effort for recusado), o
+// agente cai para um modelo antigo e SEGUE ATENDENDO, em vez de derrubar o
+// restaurante inteiro no meio do almoço. A troca acontece uma vez por
+// processo e fica gritando no log até alguém arrumar.
+//
+// O que NÃO muda no fallback: toda a exatidão de preço, taxa, total e troco,
+// que é código e não depende de modelo nenhum.
+const MODELO_RESERVA = process.env.OPENAI_MODEL_RESERVA || 'gpt-4o';
+let modeloAtivo = MODEL_AGENTE;
+let usaEffort = true;
 
-async function chamarModelo(client, messages) {
-  return client.chat.completions.create({
-    model: MODEL_AGENTE,
-    max_completion_tokens: MAX_TOKENS_AGENTE,
-    reasoning_effort: EFFORT_AGENTE,
+function erroDeModeloIndisponivel(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = err?.code || err?.error?.code || '';
+  return err?.status === 404
+    || code === 'model_not_found'
+    || /does not exist|do not have access|unsupported model|unknown model/.test(msg);
+}
+
+function erroDeParametro(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return err?.status === 400 && /reasoning_effort|max_completion_tokens|unsupported parameter|unrecognized/.test(msg);
+}
+
+function montarPayload(messages) {
+  const payload = {
+    model: modeloAtivo,
     messages,
     tools: TOOLS,
     tool_choice: 'auto',
     // Uma tool por vez: o rascunho é lido e reescrito a cada chamada, então
     // duas tools em paralelo poderiam se atropelar no mesmo estado.
     parallel_tool_calls: false,
-  });
+  };
+  if (usaEffort) {
+    payload.max_completion_tokens = MAX_TOKENS_AGENTE;
+    payload.reasoning_effort = EFFORT_AGENTE;
+  } else {
+    // Modelos anteriores ao 5.x não conhecem reasoning_effort e usam o
+    // parâmetro antigo de limite de saída.
+    payload.max_tokens = MAX_TOKENS_AGENTE;
+  }
+  return payload;
+}
+
+async function chamarModelo(client, messages) {
+  try {
+    return await client.chat.completions.create(montarPayload(messages));
+  } catch (err) {
+    if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
+      logger.error('agente/modelo-indisponivel',
+        `Sem acesso a "${modeloAtivo}" — caindo para "${MODELO_RESERVA}". Confira o plano da conta OpenAI.`,
+        { erro: err.message });
+      modeloAtivo = MODELO_RESERVA;
+      usaEffort = false;
+      return client.chat.completions.create(montarPayload(messages));
+    }
+    if (erroDeParametro(err) && usaEffort) {
+      logger.error('agente/parametro-recusado',
+        `"${modeloAtivo}" recusou reasoning_effort — repetindo sem ele.`,
+        { erro: err.message });
+      usaEffort = false;
+      return client.chat.completions.create(montarPayload(messages));
+    }
+    throw err;
+  }
+}
+
+// Chamada sem tools (follow-up). Mesma proteção de fallback do agente.
+async function chamarModeloSimples(client, maxTokens, messages) {
+  const monta = () => (usaEffort
+    ? { model: modeloAtivo, messages, max_completion_tokens: maxTokens, reasoning_effort: 'low' }
+    : { model: modeloAtivo, messages, max_tokens: maxTokens });
+
+  try {
+    return await client.chat.completions.create(monta());
+  } catch (err) {
+    if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
+      modeloAtivo = MODELO_RESERVA;
+      usaEffort = false;
+      return client.chat.completions.create(monta());
+    }
+    if (erroDeParametro(err) && usaEffort) {
+      usaEffort = false;
+      return client.chat.completions.create(monta());
+    }
+    throw err;
+  }
+}
+
+// Exposto no /health pra dar pra ver, de fora, se o fallback entrou em ação.
+function modeloEmUso() {
+  return { configurado: MODEL_AGENTE, em_uso: modeloAtivo, usando_effort: usaEffort };
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -337,12 +418,11 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
   while (msgs.length && msgs[0].role !== 'user') msgs.shift();
   if (!msgs.length) msgs.push({ role: 'user', content: '(cliente ficou em silêncio)' });
 
+  // Usa o mesmo caminho protegido do agente: se o modelo novo não estiver
+  // disponível, o follow-up também cai pro reserva em vez de falhar em silêncio
+  // dentro do poller.
   const resposta = await comRetry(
-    () => client.chat.completions.create({
-      model: MODEL_AGENTE,
-      max_completion_tokens: 600,
-      reasoning_effort: 'low',
-      messages: [
+    () => chamarModeloSimples(client, 600, [
         { role: 'system', content: SYSTEM_ESTATICO },
         { role: 'system', content: montarContextoDinamico(rascunho, null) },
         ...msgs,
@@ -350,8 +430,7 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
           role: 'system',
           content: 'TAREFA AGORA: o cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando de onde parou — sem inventar informação nova, sem repetir o cardápio inteiro, sem citar valores, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
         },
-      ],
-    }),
+      ]),
     { tentativas: 2, requestId, etapa: 'openai/followup' }
   );
 
@@ -360,4 +439,4 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
   return texto;
 }
 
-module.exports = { rodarAgente, confirmarPedido, gerarFollowup, SYSTEM_ESTATICO, montarContextoDinamico };
+module.exports = { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, SYSTEM_ESTATICO, montarContextoDinamico };

@@ -15,7 +15,7 @@ const {
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
   reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
-const { rodarAgente, confirmarPedido, gerarFollowup } = require('./agent');
+const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
 const { PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money, MODEL_AGENTE } = require('./config');
@@ -144,11 +144,13 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     ts: new Date().toISOString(),
-    agente: 'Chapelão v2',
-    modelo: MODEL_AGENTE,
+    agente: 'Chapelão v3',
+    // Mostra o modelo configurado E o que está realmente em uso. Se o
+    // fallback tiver entrado em ação (conta sem acesso ao modelo novo), dá
+    // pra ver aqui de fora, sem precisar caçar no log.
+    modelo: modeloEmUso(),
     vars: {
       supa: !!process.env.SUPA_URL,
-      anthropic: !!process.env.ANTHROPIC_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
       evolution: !!process.env.EVOLUTION_URL,
     },
