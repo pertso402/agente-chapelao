@@ -9,7 +9,7 @@ process.env.TAXA_ENTREGA = process.env.TAXA_ENTREGA || '11';
 
 const assert = require('assert');
 const { TAXA_ENTREGA, fmtBRL } = require('../src/config');
-const { calcularTotais, montarResumoFinal } = require('../src/utils/pedido');
+const { calcularTotais, montarResumoFinal, avaliarRascunho } = require('../src/utils/pedido');
 
 let passou = 0;
 function teste(nome, fn) {
@@ -120,6 +120,63 @@ teste('resumo não usa markdown que o WhatsApp não renderiza', () => {
   });
   assert.ok(!/^#{1,6}\s/m.test(texto), 'resumo contém título markdown (#)');
   assert.ok(!/^\d+\.\s/m.test(texto), 'resumo contém lista numerada markdown');
+});
+
+console.log('\n🎩 Troco (pagamento em dinheiro)\n');
+
+const RASCUNHO_BASE = {
+  itens: JSON.stringify(ITENS),
+  nome_cliente: 'Ana',
+  tipo_entrega: 'delivery',
+  endereco: 'Rua X, 100',
+};
+
+teste('dinheiro sem troco definido deixa o pedido INCOMPLETO', () => {
+  const av = avaliarRascunho({ ...RASCUNHO_BASE, forma_pagamento: 'dinheiro' });
+  assert.ok(!av.completo, 'não deveria estar completo sem a resposta do troco');
+  assert.ok(av.faltando.includes('troco'));
+});
+
+teste('troco 0 ("tenho o valor certo") COMPLETA o pedido', () => {
+  const av = avaliarRascunho({ ...RASCUNHO_BASE, forma_pagamento: 'dinheiro', troco_para: 0 });
+  assert.ok(av.completo, 'zero é resposta válida e não pode travar o pedido');
+});
+
+teste('pix e cartão não exigem troco', () => {
+  for (const forma of ['pix', 'cartao']) {
+    const av = avaliarRascunho({ ...RASCUNHO_BASE, forma_pagamento: forma });
+    assert.ok(av.completo, `${forma} não deveria pedir troco`);
+  }
+});
+
+teste('resumo mostra a nota do cliente E o troco já calculado', () => {
+  const totais = calcularTotais({ itens: ITENS, tipoEntrega: 'delivery' });
+  const texto = montarResumoFinal({
+    itens: ITENS, brindes: [], tipoEntrega: 'delivery', endereco: 'Rua X, 100',
+    formaPagamento: 'dinheiro', trocoPara: 100, totais,
+  });
+  // total 70,00 → troco de 30,00
+  assert.ok(texto.includes('Troco para R$ 100,00'), `faltou a nota do cliente:\n${texto}`);
+  assert.ok(texto.includes('levo R$ 30,00'), `troco calculado errado:\n${texto}`);
+});
+
+teste('resumo com troco 0 diz "sem troco" e não mostra conta', () => {
+  const totais = calcularTotais({ itens: ITENS, tipoEntrega: 'retirada' });
+  const texto = montarResumoFinal({
+    itens: ITENS, brindes: [], tipoEntrega: 'retirada',
+    formaPagamento: 'dinheiro', trocoPara: 0, totais,
+  });
+  assert.ok(texto.includes('Sem troco (valor certo)'));
+  assert.ok(!texto.includes('levo R$'));
+});
+
+teste('pix não mostra linha de troco', () => {
+  const totais = calcularTotais({ itens: ITENS, tipoEntrega: 'delivery' });
+  const texto = montarResumoFinal({
+    itens: ITENS, brindes: [], tipoEntrega: 'delivery', endereco: 'Rua X, 100',
+    formaPagamento: 'pix', trocoPara: 100, totais,
+  });
+  assert.ok(!texto.includes('Troco'), 'troco não faz sentido em PIX');
 });
 
 console.log(`\n${process.exitCode ? '❌ FALHOU' : `✅ ${passou} testes passaram`}\n`);

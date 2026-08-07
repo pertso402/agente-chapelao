@@ -11,28 +11,30 @@ function prioridadeCategoria(cat) {
   return ORDEM_CATEGORIA[k] ?? 5;
 }
 
-// ─── DEFINIÇÃO DAS TOOLS (formato Anthropic Messages API) ────────────────────
+// ─── DEFINIÇÃO DAS TOOLS (formato OpenAI function calling) ───────────────────
 
-const TOOLS = [
+// Cada tool é declarada uma vez aqui e embrulhada no formato da API logo
+// abaixo — assim nome, descrição e schema ficam legíveis sem o aninhamento.
+const DEFINICOES = [
   {
     name: 'buscar_cardapio',
     description: 'Retorna todos os produtos disponíveis com preços REAIS. Use SEMPRE antes de citar qualquer produto, preço ou quando o cliente quiser pedir. Nunca invente itens.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+    parameters: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'buscar_itens_do_dia',
     description: 'Retorna as carnes, base e acompanhamentos disponíveis HOJE na marmitex — a mesma configuração que a cozinha usa no ERP (Porcionamento → Itens do dia). Use sempre que falar de marmitex.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+    parameters: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'info_restaurante',
     description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+    parameters: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'salvar_dados_pedido',
     description: 'Salva/atualiza os dados do pedido no rascunho. Chame SEMPRE que coletar qualquer informação (itens, nome, entrega, endereço, pagamento) — pode chamar com um campo só, ou sem nenhum campo apenas para consultar o estado atual. O retorno diz o que ainda falta e, quando estiver tudo completo, entrega o RESUMO FINAL já pronto para você copiar. NÃO precisa enviar tudo de uma vez.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         nome_cliente: { type: 'string', description: 'Nome do cliente' },
@@ -65,6 +67,10 @@ const TOOLS = [
         tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
         endereco:        { type: 'string', description: 'Endereço completo (só se delivery)' },
         forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
+        troco_para:      {
+          type: 'number',
+          description: 'SÓ quando forma_pagamento for "dinheiro". É a nota com que o cliente vai pagar (ex: 100 se ele disser "troco pra 100"). Se ele disser que tem o valor certo ou que não precisa de troco, envie 0. NUNCA envie o valor do troco calculado — envie a nota que ele vai entregar. Quem calcula o troco é o sistema.',
+        },
       },
       required: [],
     },
@@ -72,7 +78,7 @@ const TOOLS = [
   {
     name: 'atualizar_status_pedido',
     description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: { novo_status: { type: 'string', enum: ['preparando', 'cancelado'] } },
       required: ['novo_status'],
@@ -81,7 +87,7 @@ const TOOLS = [
   {
     name: 'chamar_atendente',
     description: 'Chama um atendente HUMANO. Use SEMPRE que: você não souber responder algo com certeza; tiver qualquer dúvida real sobre o que fazer; o cliente pedir algo fora do fluxo normal (alterar pedido já fechado, cancelar, reclamar, negociar preço/desconto, pedir nota fiscal, perguntar sobre pedido anterior); ou acontecer qualquer coisa que você não consiga resolver sozinho com as outras tools. Na dúvida entre chutar e chamar — CHAME. O sistema cria um alerta no painel e pausa seu atendimento por 10 minutos para o atendente assumir.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         motivo: { type: 'string', description: 'Resumo curto e claro do que o cliente precisa/está reclamando, pra o atendente entender rápido sem reler a conversa toda.' },
@@ -170,6 +176,9 @@ async function executarTool(nome, args, contexto = {}) {
       if (args.tipo_entrega)    campos.tipo_entrega    = args.tipo_entrega;
       if (args.endereco)        campos.endereco        = args.endereco;
       if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
+      // troco 0 é resposta válida ("tenho o valor certo") — por isso o teste é
+      // contra null/undefined, não contra "valor falsy".
+      if (args.troco_para != null) campos.troco_para = Math.max(0, Number(args.troco_para) || 0);
 
       // Chamada sem nenhum campo é legítima: é assim que o agente pede o
       // RESUMO_FINAL_TEXTO_EXATO quando o pedido já estava completo antes
@@ -199,6 +208,9 @@ async function executarTool(nome, args, contexto = {}) {
         tipo_entrega: rascunho.tipo_entrega || null,
         endereco: rascunho.endereco || null,
         forma_pagamento: rascunho.forma_pagamento || null,
+        troco_para: rascunho.troco_para == null
+          ? null
+          : (Number(rascunho.troco_para) === 0 ? 'não precisa de troco' : fmtBRL(rascunho.troco_para)),
       };
 
       if (avisos?.length) resumo.AVISOS = avisos;
@@ -231,6 +243,7 @@ async function executarTool(nome, args, contexto = {}) {
           tipoEntrega: rascunho.tipo_entrega,
           endereco: rascunho.endereco,
           formaPagamento: rascunho.forma_pagamento,
+          trocoPara: rascunho.troco_para,
           totais: p,
           cupomCodigo: ofertaAtiva?.codigo,
         });
@@ -271,5 +284,7 @@ async function executarTool(nome, args, contexto = {}) {
       throw new Error(`Tool desconhecida: ${nome}`);
   }
 }
+
+const TOOLS = DEFINICOES.map(d => ({ type: 'function', function: d }));
 
 module.exports = { TOOLS, executarTool };

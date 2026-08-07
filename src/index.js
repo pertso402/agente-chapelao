@@ -5,12 +5,12 @@ require('dotenv').config();
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const logger = require('./logger');
-const { extrairMensagem, downloadMidia, enviarTexto, manterDigitando, ehEcoDoBot } = require('./services/evolution');
+const { extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot } = require('./services/evolution');
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho,
-  buscarInfo, atualizarStatusPedido, buscarPedidoPendente,
+  buscarInfo, atualizarStatusPedido, buscarPedidoPendente, buscarVideoBuffet,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
   reivindicarFollowups, reivindicarTravados,
@@ -18,7 +18,7 @@ const {
 const { rodarAgente, confirmarPedido, gerarFollowup } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
-const { PAUSA_ATENDENTE_MS, fmtBRL, MODEL_AGENTE } = require('./config');
+const { PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money, MODEL_AGENTE } = require('./config');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -218,12 +218,29 @@ async function processarMensagem(msg, requestId) {
         conteudo = `🎙️ [Áudio]: ${transcricao}`;
         logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
       } catch (err) {
-        // Não dá pra "adivinhar" o que o cliente falou. Sem transcrição, quem
-        // assume é gente — pedir pra repetir num loop infinito é pior.
+        // Áudio não entendido. A escada é: 1ª vez pede pra escrever; se
+        // acontecer de novo, entrega pra uma pessoa. Adivinhar o que o cliente
+        // falou não é opção, e ficar pedindo "repete" pra sempre é pior ainda.
         logger.error('midia/audio/erro', err.message, { requestId, telefone, stack: err.stack });
-        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Não consegui transcrever o áudio do cliente: ${err.message}`, requestId, {
-          mensagemCliente: 'Recebi seu áudio, mas não consegui escutar direito aqui 😕 Já chamei um atendente pra te ajudar — ele assume em instantes. Se preferir, pode me mandar por escrito também!',
-        });
+
+        const rascunhoAudio = await carregarRascunho(telefone).catch(() => null);
+        const falhas = (rascunhoAudio?.audio_falhas || 0) + 1;
+        await salvarRascunho(telefone, { audio_falhas: falhas }).catch(() => {});
+
+        if (falhas < MAX_FALHAS_AUDIO) {
+          await responder(
+            telefone,
+            'Opa, não consegui escutar seu áudio direito aqui 😕 Me manda por escrito o que você quer, por favor?',
+            { requestId, etapa: 'audioPedirTexto' }
+          );
+        } else {
+          await escalarParaAtendente(
+            telefone,
+            `🎙️ [ÁUDIO ILEGÍVEL] ${falhas} áudios seguidos sem transcrição para este cliente. Último erro: ${err.message}`,
+            requestId,
+            { mensagemCliente: 'Ainda não consegui escutar direito 😔 Já chamei um atendente pra falar com você — ele assume em instantes!' }
+          );
+        }
         return;
       }
     }
@@ -298,6 +315,9 @@ async function processarMensagem(msg, requestId) {
       ultima_msg_em: new Date().toISOString(),
       ultima_msg_role: 'user',
       followup_enviado: false,
+      // Chegou mensagem compreensível: zera a contagem de áudios falhados,
+      // pra um problema pontual de hoje não escalar pra atendente amanhã.
+      audio_falhas: 0,
     }).catch(err => logger.warn('rascunho/stamp-user-falhou', err.message, { requestId, telefone }));
 
     // ── Estado ──────────────────────────────────────────────────────────────
@@ -370,8 +390,16 @@ async function processarMensagem(msg, requestId) {
         const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
         const linhaDesconto = r.desconto > 0 ? `🎁 Desconto (${r.cupomAplicado}): -${fmt(r.desconto)}\n` : '';
         const linhaBrinde = r.brindes?.length ? `🎁 Brinde: ${r.brindes.join(' + ')} (cortesia)\n` : '';
+        // Troco: repete o combinado já com a conta feita, pra o cliente
+        // conferir agora e não na porta.
+        const linhaTroco = (r.formaPagamento === 'dinheiro' && r.trocoPara != null)
+          ? (Number(r.trocoPara) === 0
+              ? '💵 Sem troco (valor certo)\n'
+              : `💵 Troco para ${fmt(r.trocoPara)} — levamos ${fmt(money(Number(r.trocoPara) - Number(r.total)))}\n`)
+          : '';
         const corpo =
-          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + linhaDesconto + linhaBrinde + `💰 *Total: ${fmt(r.total)}*\n\n`;
+          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + linhaDesconto + linhaBrinde +
+          `💰 *Total: ${fmt(r.total)}*\n` + linhaTroco + '\n';
 
         if (r.formaPagamento === 'pix') {
           const info = await buscarInfo();
@@ -426,7 +454,32 @@ async function processarMensagem(msg, requestId) {
     const pararDigitandoAgente = manterDigitando(telefone);
     try {
       const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-      const { texto, atendenteChamado } = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
+      const { texto, atendenteChamado, mostrouCardapio } = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
+
+      // Cliente perguntou o cardápio → manda o vídeo do buffet de hoje ANTES
+      // do texto. Ver a comida vende mais que ler a lista, e o vídeo chegando
+      // primeiro faz a mensagem seguinte parecer a legenda dele.
+      //
+      // Quem decide é o CÓDIGO (o agente usou uma tool de cardápio?), não a
+      // LLM: assim ela não promete vídeo que não existe nem esquece de mandar.
+      if (mostrouCardapio) {
+        try {
+          const video = await buscarVideoBuffet();
+          if (video) {
+            await enviarMidia(telefone, video.url, {
+              tipo: video.tipo,
+              legenda: '🍽️ Esse é o nosso buffet de hoje!',
+            });
+            logger.info('buffet/video-enviado', 'Vídeo do buffet enviado', { requestId, telefone, tipo: video.tipo });
+          } else {
+            logger.info('buffet/sem-video', 'Nenhum vídeo de buffet para hoje', { requestId, telefone });
+          }
+        } catch (err) {
+          // Vídeo é um extra. Se falhar, o cardápio em texto ainda vai — não
+          // faz sentido derrubar o atendimento por causa disso.
+          logger.warn('buffet/video-falhou', err.message, { requestId, telefone });
+        }
+      }
 
       if (!texto) {
         // Resposta vazia é sintoma de algo errado (raciocínio consumiu todo o

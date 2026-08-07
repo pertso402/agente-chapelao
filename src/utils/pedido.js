@@ -35,6 +35,10 @@ function avaliarRascunho(r = {}) {
   if (!r.tipo_entrega)                                  faltando.push('tipo_entrega');
   if (r.tipo_entrega === 'delivery' && !r.endereco)     faltando.push('endereco');
   if (!r.forma_pagamento)                               faltando.push('forma_pagamento');
+  // Dinheiro sem troco definido é pedido incompleto: o entregador sai sem
+  // saber quanto levar e a conta acontece na porta do cliente. Zero é uma
+  // resposta válida ("tenho o valor certo") — por isso o teste é != null.
+  if (r.forma_pagamento === 'dinheiro' && r.troco_para == null) faltando.push('troco');
 
   const completo = faltando.length === 0;
 
@@ -52,6 +56,7 @@ const LABEL_FALTANDO = {
   tipo_entrega:    'se é entrega (delivery) ou retirada',
   endereco:        'o endereço de entrega',
   forma_pagamento: 'a forma de pagamento (pix, dinheiro ou cartão)',
+  troco:           'se precisa de troco e pra quanto (pagamento em dinheiro)',
 };
 
 function descreverFaltando(faltando) {
@@ -95,7 +100,16 @@ function linhaItem(i) {
   return `🍱 ${qtd}x ${i.nome} — ${fmtBRL(totalItem)}${obs}`;
 }
 
-function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamento, totais, cupomCodigo }) {
+// Linha do troco: mostra a nota que o cliente vai dar E o troco que o
+// entregador precisa levar — já calculado, pra ninguém fazer conta na porta.
+function linhaTroco(formaPagamento, trocoPara, total) {
+  if (formaPagamento !== 'dinheiro' || trocoPara == null) return null;
+  if (Number(trocoPara) === 0) return '💵 Sem troco (valor certo)';
+  const troco = money(Number(trocoPara) - Number(total));
+  return `💵 Troco para ${fmtBRL(trocoPara)} — levo ${fmtBRL(troco)}`;
+}
+
+function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamento, trocoPara, totais, cupomCodigo }) {
   const linhas = [];
   linhas.push('🎩 *Confira seu pedido:*');
   linhas.push('');
@@ -115,6 +129,10 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   if (totais.taxaEntrega > 0) linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
   if (totais.desconto > 0)    linhas.push(`🏷️ Desconto${cupomCodigo ? ` (${cupomCodigo})` : ''}: -${fmtBRL(totais.desconto)}`);
   linhas.push(`💰 *Total: ${fmtBRL(totais.total)}*`);
+
+  const troco = linhaTroco(formaPagamento, trocoPara, totais.total);
+  if (troco) linhas.push(troco);
+
   linhas.push('');
   linhas.push('_Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._');
 
@@ -128,5 +146,5 @@ function rotuloPagamento(f) {
 
 module.exports = {
   normalizar, parseItens, avaliarRascunho, descreverFaltando, calcularSubtotal,
-  calcularTotais, montarResumoFinal, rotuloPagamento, LABEL_FALTANDO,
+  calcularTotais, montarResumoFinal, linhaTroco, rotuloPagamento, LABEL_FALTANDO,
 };

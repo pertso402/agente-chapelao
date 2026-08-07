@@ -1,35 +1,36 @@
 'use strict';
 
-// Áudio: OpenAI gpt-4o-transcribe (a Anthropic não faz transcrição de áudio).
-// Imagem: Claude Opus 5 com saída estruturada — o comprovante PIX volta como
-// JSON validado por schema, não como texto livre pra alguém interpretar.
+// Áudio e imagem, tudo na OpenAI.
+//   Áudio  → gpt-transcribe (com fallbacks), guiado pelo vocabulário da casa.
+//   Imagem → gpt-5.6-terra com saída estruturada por schema: o comprovante PIX
+//            volta como JSON validado, não como texto livre pra alguém adivinhar.
 
-const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
 const FormData = require('form-data');
 const axios = require('axios');
 const { MODEL_VISAO, money } = require('../config');
 const logger = require('../logger');
 
 function getClient() {
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
 // ─── TRANSCRIÇÃO DE ÁUDIO ─────────────────────────────────────────────────────
-// Áudio de WhatsApp é o pior caso pra transcrição: ruído de rua, cozinha,
-// pessoa andando. Duas coisas melhoram muito a taxa de acerto:
-//   1. gpt-4o-transcribe no lugar do whisper-1 (bem melhor em pt-BR ruidoso).
-//   2. um "prompt" com o vocabulário do restaurante — sem ele, "marmitex
-//      média" vira "marmita média", "maionese" vira "mayonese", e os nomes
-//      dos itens do dia saem irreconhecíveis.
+// Áudio de WhatsApp é o pior caso: ruído de rua, cozinha, pessoa andando.
+// Duas coisas melhoram muito a taxa de acerto:
+//   1. gpt-transcribe no lugar do whisper-1 (bem melhor em pt-BR ruidoso).
+//   2. um "prompt" com o vocabulário do restaurante — sem ele "marmitex média"
+//      vira "marmita media" e os nomes dos itens do dia saem irreconhecíveis.
 const VOCABULARIO = [
   'Restaurante Chapelão', 'marmitex', 'marmitex pequena', 'marmitex média', 'marmitex grande',
-  'combo', 'maionese', 'refrigerante', 'Coca-Cola', 'Guaraná', 'suco',
-  'arroz', 'feijão', 'farofa', 'salada', 'purê', 'macarrão', 'strogonoff',
-  'frango', 'carne de panela', 'bife', 'linguiça', 'costela', 'parmegiana',
-  'delivery', 'entrega', 'retirada', 'PIX', 'dinheiro', 'cartão', 'troco',
+  'refeição', 'esfirra', 'combo', 'maionese', 'refrigerante', 'Coca-Cola', 'Guaraná', 'suco',
+  'arroz', 'feijão', 'farofa', 'salada', 'purê', 'macarrão', 'strogonoff', 'almôndegas',
+  'frango assado', 'bife de paleta', 'costela assada', 'linguiça assada', 'banana à milanesa',
+  'batata frita', 'refogado de repolho', 'delivery', 'entrega', 'retirada',
+  'PIX', 'dinheiro', 'cartão', 'troco',
 ].join(', ');
 
-const MODELOS_TRANSCRICAO = ['gpt-4o-transcribe', 'whisper-1'];
+const MODELOS_TRANSCRICAO = ['gpt-transcribe', 'gpt-4o-transcribe', 'whisper-1'];
 
 async function transcreverComModelo(base64, mimetype, modelo) {
   const buffer = Buffer.from(base64, 'base64');
@@ -59,11 +60,20 @@ async function transcreverComModelo(base64, mimetype, modelo) {
   return data.text.trim();
 }
 
+// Transcrição vazia, com uma letra só, ou puro ruído ("...", "hmm") não é
+// transcrição — é falha. Deixar passar faria o agente responder a nada.
+function transcricaoUtil(texto) {
+  const limpo = String(texto || '').replace(/[.…,!?\s]/g, '');
+  return limpo.length >= 2;
+}
+
 async function transcreverAudio(base64, mimetype = 'audio/ogg') {
   let ultimoErro;
   for (const modelo of MODELOS_TRANSCRICAO) {
     try {
-      return await transcreverComModelo(base64, mimetype, modelo);
+      const texto = await transcreverComModelo(base64, mimetype, modelo);
+      if (!transcricaoUtil(texto)) throw new Error(`${modelo} retornou transcrição vazia ou sem conteúdo.`);
+      return texto;
     } catch (err) {
       ultimoErro = err;
       logger.warn('midia/audio/modelo-falhou', `${modelo} falhou: ${err.message}`, { modelo });
@@ -73,10 +83,11 @@ async function transcreverAudio(base64, mimetype = 'audio/ogg') {
 }
 
 // ─── ANÁLISE DE IMAGEM / COMPROVANTE PIX ──────────────────────────────────────
-// Saída estruturada (json_schema): o modelo é obrigado a devolver exatamente
-// estes campos. Antes a decisão "é comprovante?" saía de procurar as palavras
-// "sim" e "pix" num texto livre — qualquer frase do tipo "não, isto não é um
-// comprovante PIX" era classificada como comprovante e liberava o pedido.
+// Saída estruturada (json_schema com strict): o modelo é obrigado a devolver
+// exatamente estes campos. Antes a decisão "é comprovante?" saía de procurar as
+// palavras "sim" e "pix" num texto livre — qualquer frase do tipo "não, isto
+// não é um comprovante PIX" era classificada como comprovante e liberava o
+// pedido pra cozinha.
 
 const SCHEMA_IMAGEM = {
   type: 'object',
@@ -94,11 +105,11 @@ const SCHEMA_IMAGEM = {
       type: ['number', 'null'],
       description: 'Valor transferido em reais, apenas o número (ex: 34.00). null se não for comprovante ou se o valor não estiver legível.',
     },
-    data_hora: { type: ['string', 'null'], description: 'Data e hora da transação como aparece na imagem. null se ausente.' },
-    destinatario: { type: ['string', 'null'], description: 'Nome de quem RECEBEU. null se ausente.' },
-    remetente: { type: ['string', 'null'], description: 'Nome de quem PAGOU. null se ausente.' },
+    data_hora:   { type: ['string', 'null'], description: 'Data e hora da transação como aparece na imagem. null se ausente.' },
+    destinatario:{ type: ['string', 'null'], description: 'Nome de quem RECEBEU. null se ausente.' },
+    remetente:   { type: ['string', 'null'], description: 'Nome de quem PAGOU. null se ausente.' },
     instituicao: { type: ['string', 'null'], description: 'Banco ou instituição do comprovante. null se ausente.' },
-    descricao: { type: 'string', description: 'Uma frase curta em português descrevendo o que é a imagem.' },
+    descricao:   { type: 'string', description: 'Uma frase curta em português descrevendo o que é a imagem.' },
   },
   required: ['eh_comprovante', 'confianca', 'valor', 'data_hora', 'destinatario', 'remetente', 'instituicao', 'descricao'],
   additionalProperties: false,
@@ -118,23 +129,23 @@ Ao ler um comprovante:
 async function analisarImagem(base64, mimetype = 'image/jpeg') {
   const client = getClient();
 
-  const resposta = await client.messages.create({
+  const resposta = await client.chat.completions.create({
     model: MODEL_VISAO,
-    max_tokens: 2048,
-    output_config: {
-      effort: 'medium',
-      format: { type: 'json_schema', schema: SCHEMA_IMAGEM },
+    max_completion_tokens: 1500,
+    reasoning_effort: 'low',
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'analise_imagem', strict: true, schema: SCHEMA_IMAGEM },
     },
     messages: [
       {
         role: 'user',
         content: [
           {
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: String(mimetype || 'image/jpeg').split(';')[0],
-              data: base64,
+            type: 'image_url',
+            image_url: {
+              url: `data:${String(mimetype || 'image/jpeg').split(';')[0]};base64,${base64}`,
+              detail: 'high', // comprovante tem número pequeno; 'low' erra centavo
             },
           },
           { type: 'text', text: INSTRUCAO_IMAGEM },
@@ -143,11 +154,8 @@ async function analisarImagem(base64, mimetype = 'image/jpeg') {
     ],
   });
 
-  if (resposta.stop_reason === 'refusal') {
-    throw new Error('Modelo recusou analisar a imagem.');
-  }
-
-  const texto = (resposta.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  const texto = resposta.choices[0]?.message?.content?.trim() || '';
+  if (!texto) throw new Error('Modelo não retornou análise da imagem.');
 
   let dados;
   try {

@@ -1,7 +1,7 @@
 {
   "name": "chapelao-agente",
-  "version": "3.0.0",
-  "description": "Agente de atendimento WhatsApp do Restaurante Chapelão (Claude Opus 5)",
+  "version": "3.1.0",
+  "description": "Agente de atendimento WhatsApp do Restaurante Chapelão (OpenAI GPT-5.6)",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -10,12 +10,12 @@
     "test:precos": "node scripts/testar-precos.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.72.0",
     "@supabase/supabase-js": "^2.45.0",
     "axios": "^1.7.0",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "form-data": "^4.0.0",
+    "openai": "^6.19.0",
     "uuid": "^10.0.0",
     "ws": "^8.18.0"
   },

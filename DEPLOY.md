@@ -1,4 +1,4 @@
-# Deploy — Agente Chapelão v3
+# Deploy — Agente Chapelão v3.1
 
 O sistema tem **duas partes**:
 
@@ -37,8 +37,7 @@ SUPA_URL=https://qlswjefuinhbtlhauhgj.supabase.co
 SUPA_KEY=<anon key>
 SUPA_SERVICE_KEY=<service role key>
 
-ANTHROPIC_API_KEY=sk-ant-...      # agente Claude Opus 5 + leitura de comprovante
-OPENAI_API_KEY=sk-...             # só transcrição de áudio
+OPENAI_API_KEY=sk-...               # agente + comprovante PIX + áudio
 
 EVOLUTION_URL=https://sua-evolution-api.com
 EVOLUTION_KEY=sua-key
@@ -51,8 +50,9 @@ TZ_RESTAURANTE=America/Sao_Paulo
 PORT=3000
 ```
 
-> ⚠️ `ANTHROPIC_API_KEY` é nova nesta versão. Sem ela o agente não sobe.
-> `OPENAI_API_KEY` continua necessária **só** para áudio.
+> O agente roda em **OpenAI GPT-5.6 Terra**. A única variável obrigatória que
+> você precisa conferir no EasyPanel além das que já existiam é `TAXA_ENTREGA=11`.
+> Todo o resto tem padrão no código.
 
 ## 4. Evolution API — webhook
 
@@ -65,8 +65,8 @@ Eventos: messages.upsert
 
 ```
 GET https://SEU-DOMINIO/health
-→ { "status": "ok", "modelo": "claude-opus-5",
-    "vars": { "supa": true, "anthropic": true, "openai": true, "evolution": true } }
+→ { "status": "ok", "modelo": "gpt-5.6-terra",
+    "vars": { "supa": true, "openai": true, "evolution": true } }
 ```
 
 Qualquer `false` em `vars` = variável faltando.
@@ -115,7 +115,7 @@ estado/ok
 pix/comprovante-recebido   ← comprovante PIX
 pix/valor-divergente       ← comprovante não bateu com o total
 pedido/confirmando-via-SIM
-agente/chamando-claude
+agente/chamando-openai
 tool/<nome>
 agente/ok
 whatsapp/ok

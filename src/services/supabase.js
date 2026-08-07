@@ -380,6 +380,23 @@ async function buscarItensDoDia() {
   return porCategoria;
 }
 
+// ─── VÍDEO DO BUFFET DE HOJE ──────────────────────────────────────────────────
+// A equipe grava o buffet montado e sobe pelo painel todo dia (tabela
+// midia_do_dia + bucket público buffet-videos). Quando o cliente pergunta o
+// cardápio, ver a comida vale mais que ler a lista.
+async function buscarVideoBuffet() {
+  const { data, error } = await sb
+    .from('midia_do_dia')
+    .select('video_url, tipo, data')
+    .eq('data', hojeLocal())
+    .eq('ativo', true)
+    .maybeSingle();
+
+  if (error) throw new Error(`Supabase/buscarVideoBuffet: ${error.message}`);
+  if (!data?.video_url) return null;
+  return { url: data.video_url, tipo: data.tipo === 'image' ? 'image' : 'video' };
+}
+
 async function buscarInfo() {
   const { data, error } = await sb.from('info_restaurante').select('chave, valor');
   if (error) throw new Error(`Supabase/buscarInfo: ${error.message}`);
@@ -563,7 +580,7 @@ async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom }) {
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupom, itensBrinde }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, itens, cupom, itensBrinde }) {
   const tel = String(telefone).replace(/\D/g, '');
 
   const {
@@ -574,6 +591,12 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
   const canal = cliente.veio_de_anuncio ? 'whatsapp_anuncio' : 'whatsapp_organico';
 
+  // Troco só existe em dinheiro. Zero significa "cliente tem o valor certo" —
+  // é informação útil pro entregador, então é gravado como 0 e não como nulo.
+  const troco = (formaPagamento === 'dinheiro' && trocoPara != null)
+    ? money(trocoPara)
+    : null;
+
   const { data: pedido, error: pErr } = await sb
     .from('pedidos')
     .insert({
@@ -582,6 +605,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       tipo_entrega: tipoEntrega,
       endereco_entrega: endereco || null,
       forma_pagamento: formaPagamento,
+      troco_para: troco,
       subtotal,
       taxa_entrega: taxaEntrega,
       desconto,
@@ -650,6 +674,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   return {
     numeroPedido: pedido.numero_pedido,
     total, subtotal, taxaEntrega, desconto,
+    trocoPara: troco,
     cupomAplicado: cupom ? cupom.codigo : null,
     brindes: listaBrinde.map(b => `${b.quantidade || 1}x ${b.nome}`),
     formaPagamento,
@@ -690,7 +715,7 @@ module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
-  precificarPedido,
+  buscarVideoBuffet, precificarPedido,
   garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
   atualizarStatusPedido, buscarPedidoPendente,
   buscarCupomAtivoPorTelefone, darBaixaCupom,

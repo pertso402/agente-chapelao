@@ -12,14 +12,15 @@ CREATE TABLE IF NOT EXISTS atendimento_alertas (
   nome_cliente TEXT,
   motivo       TEXT NOT NULL,
   status       TEXT NOT NULL DEFAULT 'aberto',  -- 'aberto' | 'resolvido'
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- criado_em (não created_at): é o nome que o painel de pedidos já consulta.
+  criado_em    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolvido_em TIMESTAMPTZ
 );
 
 -- O painel busca "o que está aberto agora" o tempo todo — este índice mantém
 -- essa consulta instantânea.
 CREATE INDEX IF NOT EXISTS idx_alertas_abertos
-  ON atendimento_alertas (created_at DESC)
+  ON atendimento_alertas (criado_em DESC)
   WHERE status = 'aberto';
 
 CREATE INDEX IF NOT EXISTS idx_alertas_telefone ON atendimento_alertas (telefone);
@@ -53,8 +54,8 @@ END $$;
 -- ─── CONSULTAS ÚTEIS ─────────────────────────────────────────────────────────
 
 -- Alertas abertos agora (é isso que o painel deve mostrar):
--- SELECT telefone, nome_cliente, motivo, created_at
---   FROM atendimento_alertas WHERE status = 'aberto' ORDER BY created_at DESC;
+-- SELECT telefone, nome_cliente, motivo, criado_em
+--   FROM atendimento_alertas WHERE status = 'aberto' ORDER BY criado_em DESC;
 
 -- Resolver um alerta E liberar a IA na hora (sem esperar os 10 min):
 -- UPDATE atendimento_alertas SET status = 'resolvido', resolvido_em = now() WHERE id = 123;

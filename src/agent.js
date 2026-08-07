@@ -1,6 +1,6 @@
 'use strict';
 
-const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
 const { TOOLS, executarTool } = require('./tools');
 const { salvarRascunho, limparRascunho, criarPedidoCompleto, tentarIniciarConfirmacao } = require('./services/supabase');
 const { avaliarRascunho, descreverFaltando, parseItens, rotuloPagamento } = require('./utils/pedido');
@@ -11,16 +11,16 @@ const {
 const logger = require('./logger');
 
 function getClient() {
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
 const MAX_ITER = 8;
 
-// ─── SYSTEM PROMPT ESTÁTICO ───────────────────────────────────────────────────
-// Byte-a-byte idêntico em toda requisição, de propósito: assim o prompt cache
-// da Anthropic o reaproveita (mais barato e mais rápido). Tudo que muda por
-// conversa (estado do pedido, cupom) vai numa mensagem `system` separada, no
-// fim do histórico — ver montarContextoDinamico().
+// Tools cujo uso significa "o cliente quer ver o cardápio" — quando alguma
+// delas roda, o sistema manda o vídeo do buffet de hoje junto da resposta.
+const TOOLS_DE_CARDAPIO = new Set(['buscar_cardapio', 'buscar_itens_do_dia']);
+
+// ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 
 const SYSTEM_ESTATICO = `Você é "Chapinha" 🎩, o atendente virtual do Restaurante Chapelão — uma marmitaria de comida caseira de verdade em Umuarama-PR.
 
@@ -51,24 +51,36 @@ Conduzir o cliente do "oi" até o pedido confirmado, sem falhar nenhuma etapa. V
 ## FLUXO DE ATENDIMENTO (conduza ativamente)
 1. Saudação calorosa + pergunte o que a pessoa deseja hoje.
 2. Para mostrar itens/preços: chame buscar_cardapio ANTES. Para marmitex: chame TAMBÉM buscar_itens_do_dia — ela informa o limite (até 2 carnes, até 6 acompanhamentos); sempre repasse esse limite.
+   O SISTEMA envia sozinho o vídeo do buffet de hoje quando você usa essas tools. Não prometa vídeo, não descreva o vídeo, não diga "vou te mandar um vídeo" — ele já vai junto.
 3. Assim que o cliente escolher um item, chame salvar_dados_pedido (NOMES EXATOS do cardápio) e depois CONFIRME de volta o item e o preço que o retorno da tool trouxe — ex: "Anotei: 1x Marmitex Pequena — R$ 23,00 ✅ Mais alguma coisa?". Só avance depois desse eco. Ele existe pra pegar item errado antes de virar pedido.
 4. Se o item for MARMITEX: pergunte quais carnes (até 2) e acompanhamentos (até 6), usando os nomes exatos de buscar_itens_do_dia, e mande no MESMO item via os campos "carnes" e "acompanhamentos". O sistema aplica o limite de verdade — se o retorno trouxer "AVISOS" dizendo que cortou algo, explique com gentileza e pergunte se as opções mantidas estão OK.
 5. O campo "itens" de salvar_dados_pedido é a lista COMPLETA e substitui a anterior inteira. Para adicionar um item, reenvie todos os itens (os antigos + o novo). Nunca mande só o item novo achando que ele será somado.
 6. Pergunte: entrega (delivery) ou retirada? → se delivery, peça o endereço completo. Se o cliente mandar localização (aparece como "📍 [Localização compartilhada]: ... link do Google Maps"), isso É endereço válido — salve o link inteiro no campo endereco, não peça pra digitar de novo.
 7. Pergunte a forma de pagamento: PIX, dinheiro ou cartão.
-8. SEMPRE que coletar algo, chame salvar_dados_pedido. O retorno diz o que ainda falta.
-9. Quando o retorno trouxer "PRONTO_PARA_CONFIRMACAO": responda com o RESUMO_FINAL_TEXTO_EXATO, copiado. Nada além disso.
-10. Depois do pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", agradeça — o sistema já cuidou do status.
+8. 💵 SE FOR DINHEIRO, é OBRIGATÓRIO perguntar em seguida: "Precisa de troco pra quanto?" — em uma mensagem curta e natural. É a diferença entre o entregador sair com troco ou o cliente ficar sem receber.
+   - Se ele disser um valor ("100", "pra 50", "cinquenta reais"), salve em troco_para.
+   - Se ele disser que tem o valor certo / não precisa de troco ("é certinho", "não precisa", "tenho trocado"), salve troco_para com o valor 0.
+   - Só siga para o resumo depois que essa pergunta estiver respondida. Nunca invente o valor do troco, nunca calcule quanto é o troco — quem calcula é o sistema.
+9. SEMPRE que coletar algo, chame salvar_dados_pedido. O retorno diz o que ainda falta.
+10. Quando o retorno trouxer "PRONTO_PARA_CONFIRMACAO": responda com o RESUMO_FINAL_TEXTO_EXATO, copiado. Nada além disso.
+11. Depois do pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", agradeça — o sistema já cuidou do status.
+
+## ÁUDIO
+Áudio chega transcrito como "🎙️ [Áudio]: ...". Trate como se o cliente tivesse digitado.
+Se a transcrição vier truncada, sem sentido, ou ambígua sobre item/quantidade/tamanho:
+- NÃO adivinhe e NÃO salve nada.
+- Peça, com leveza, que ele mande por escrito o que quer — em UMA frase curta. Ex: "Não consegui escutar direito 😅 Me manda por escrito o que você quer?"
+- Se o cliente insistir no áudio e você continuar sem entender, chame chamar_atendente.
 
 ## QUANDO CHAMAR O ATENDENTE HUMANO (tool chamar_atendente)
 Chame SEMPRE que:
 - Você não souber responder algo com certeza, ou tiver qualquer dúvida real sobre o que fazer.
 - O cliente reclamar de algo que você não resolve (pedido anterior errado, demora, produto com problema).
 - O cliente pedir alteração ou cancelamento de pedido JÁ confirmado.
-- O cliente pedir desconto, negociar preço, pedir nota fiscal, ou perguntar de pagamento/troco fora do padrão.
+- O cliente pedir desconto, negociar preço, pedir nota fiscal, ou perguntar de pagamento fora do padrão.
 - O cliente perguntar algo sobre o restaurante que nenhuma tool responde.
 - O cliente parecer irritado, confuso, ou repetir a mesma coisa porque você não entendeu.
-- Você receber um comprovante/imagem que não conseguiu ler direito.
+- Você não conseguir entender o que o cliente quer nem por áudio nem por escrito.
 - Qualquer coisa sair do fluxo normal de "montar pedido e fechar".
 
 Na dúvida entre arriscar e chamar: CHAME. Errar chamando atendente à toa custa barato; errar chutando custa um cliente. Depois de chamar, mande UMA frase curta avisando que um atendente vai assumir em instantes — e pare. Não continue o pedido, não faça perguntas, não tente resolver.
@@ -81,7 +93,6 @@ Na dúvida entre arriscar e chamar: CHAME. Errar chamando atendente à toa custa
 ⛔ Se a loja estiver fechada (info_restaurante → loja_aberta:false), informe o horário e não monte pedido.
 ⛔ ATENÇÃO LITERAL a tamanho e quantidade: pequena ≠ média ≠ grande, 1 ≠ 2. Use EXATAMENTE o que o cliente falou nesta mensagem. Na menor dúvida, pergunte — nunca chute nem "arredonde".
 ⛔ Cada pedido é INDEPENDENTE. Monte os itens SÓ com o que o cliente pediu NESTA conversa. IGNORE completamente itens de pedidos anteriores já finalizados que apareçam no histórico.
-⛔ Áudio chega transcrito como "🎙️ [Áudio]: ...". Trate como se o cliente tivesse digitado. Se a transcrição vier truncada, sem sentido ou ambígua sobre item/quantidade/tamanho, NÃO adivinhe: confirme em texto o que você entendeu antes de salvar.
 ⛔ Imagem chega descrita como "📎 [Imagem]: ...". Se for comprovante de pagamento, o sistema já trata sozinho — você não precisa fazer nada além de responder com naturalidade.
 
 ## COMUNICAÇÃO
@@ -89,9 +100,8 @@ Escreva para uma pessoa com fome, no celular, provavelmente no intervalo do trab
 Não invente promessas de prazo, entrega ou disponibilidade que nenhuma tool te deu.`;
 
 // ─── CONTEXTO DINÂMICO ────────────────────────────────────────────────────────
-// Vai como mensagem `system` no FIM do histórico (recurso do Opus 5): mantém o
-// prompt estático acima intacto no cache e ainda assim entrega o estado com
-// autoridade de sistema — o modelo não confunde com texto do cliente.
+// Estado do pedido + regras que mudam por conversa. Vai como uma segunda
+// mensagem de sistema, logo antes da fala do cliente.
 
 function montarContextoDinamico(rascunho, ofertaAtiva) {
   const partes = [];
@@ -105,6 +115,7 @@ function montarContextoDinamico(rascunho, ofertaAtiva) {
       rascunho.tipo_entrega    && `- Entrega: ${rascunho.tipo_entrega}`,
       rascunho.endereco        && `- Endereço: ${rascunho.endereco}`,
       rascunho.forma_pagamento && `- Pagamento: ${rotuloPagamento(rascunho.forma_pagamento)}`,
+      rascunho.troco_para != null && `- Troco para: ${Number(rascunho.troco_para) === 0 ? 'não precisa (valor certo)' : fmtBRL(rascunho.troco_para)}`,
     ].filter(Boolean);
 
     partes.push(`## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`);
@@ -112,7 +123,7 @@ function montarContextoDinamico(rascunho, ofertaAtiva) {
     if (av.completo) {
       partes.push('✅ TUDO COLETADO. Se você ainda não recebeu o RESUMO_FINAL_TEXTO_EXATO nesta rodada, chame salvar_dados_pedido (pode ser sem nenhum campo) para recebê-lo, e responda com ele copiado. NÃO monte o resumo por conta própria.');
     } else {
-      partes.push(`⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural.`);
+      partes.push(`⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural, uma coisa de cada vez.`);
     }
   }
 
@@ -144,55 +155,19 @@ Este cliente recebeu uma mensagem de recompra com o cupom *${ofertaAtiva.codigo}
 }
 
 // ─── CHAMADA AO MODELO ────────────────────────────────────────────────────────
-// Mensagem `system` no meio de messages[] é suportada pelo Opus 5, mas se a
-// conta estiver num modelo que não aceita, a API devolve 400. Em vez de
-// derrubar o atendimento, cai automaticamente para o modo compatível (estado
-// junto do system estático) e nunca mais tenta o formato novo neste processo.
-let suportaSystemNoHistorico = true;
 
-async function chamarModelo(client, { systemEstatico, contexto, messages }) {
-  const base = {
+async function chamarModelo(client, messages) {
+  return client.chat.completions.create({
     model: MODEL_AGENTE,
-    max_tokens: MAX_TOKENS_AGENTE,
+    max_completion_tokens: MAX_TOKENS_AGENTE,
+    reasoning_effort: EFFORT_AGENTE,
+    messages,
     tools: TOOLS,
+    tool_choice: 'auto',
     // Uma tool por vez: o rascunho é lido e reescrito a cada chamada, então
     // duas tools em paralelo poderiam se atropelar no mesmo estado.
-    tool_choice: { type: 'auto', disable_parallel_tool_use: true },
-    thinking: { type: 'adaptive' },
-    output_config: { effort: EFFORT_AGENTE },
-  };
-
-  if (suportaSystemNoHistorico) {
-    try {
-      return await client.messages.create({
-        ...base,
-        system: [{ type: 'text', text: systemEstatico, cache_control: { type: 'ephemeral' } }],
-        messages: [...messages, { role: 'system', content: contexto }],
-      });
-    } catch (err) {
-      const msg = String(err?.message || '');
-      if (!/role .?system.?|system.*not supported|unexpected role/i.test(msg)) throw err;
-      suportaSystemNoHistorico = false;
-      logger.warn('agente/system-inline-indisponivel', 'Modelo não aceita system no histórico, usando modo compatível', { erro: msg });
-    }
-  }
-
-  return client.messages.create({
-    ...base,
-    system: [
-      { type: 'text', text: systemEstatico, cache_control: { type: 'ephemeral' } },
-      { type: 'text', text: contexto },
-    ],
-    messages,
+    parallel_tool_calls: false,
   });
-}
-
-function extrairTexto(resposta) {
-  return (resposta.content || [])
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n')
-    .trim();
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -200,81 +175,68 @@ function extrairTexto(resposta) {
 async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, ofertaAtiva) {
   const client = getClient();
 
-  // A API exige que messages[0] seja 'user'. Histórico que comece com
-  // assistant (oferta enviada pelo agente de recompra antes de qualquer
-  // mensagem do cliente) daria 400 — descarta esse prefixo.
+  // A API exige que a conversa comece com system/user. Histórico que comece
+  // com assistant (oferta enviada pelo agente de recompra antes de qualquer
+  // mensagem do cliente) confunde o modelo — descarta esse prefixo.
   const anteriores = (historico || []).map(h => ({ role: h.role, content: h.content }));
   while (anteriores.length && anteriores[0].role !== 'user') anteriores.shift();
 
-  const messages = [...anteriores, { role: 'user', content: mensagemUsuario }];
+  const messages = [
+    { role: 'system', content: SYSTEM_ESTATICO },
+    { role: 'system', content: montarContextoDinamico(rascunho, ofertaAtiva) },
+    ...anteriores,
+    { role: 'user', content: mensagemUsuario },
+  ];
 
-  const contexto = montarContextoDinamico(rascunho, ofertaAtiva);
-
-  logger.step(requestId, telefone, 'agente/chamando-claude', {
+  logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL_AGENTE,
     effort: EFFORT_AGENTE,
-    historico_msgs: historico.length,
+    historico_msgs: anteriores.length,
     etapa: rascunho?.etapa_atual || 'inicio',
   });
 
   let resposta = await comRetry(
-    () => chamarModelo(client, { systemEstatico: SYSTEM_ESTATICO, contexto, messages }),
-    { tentativas: 3, requestId, etapa: 'claude/create' }
+    () => chamarModelo(client, messages),
+    { tentativas: 3, requestId, etapa: 'openai/create' }
   );
 
   let iteracoes = 0;
   let atendenteChamado = false;
+  let mostrouCardapio = false;
 
-  while (resposta.stop_reason === 'tool_use' && iteracoes < MAX_ITER) {
+  while (resposta.choices[0].finish_reason === 'tool_calls' && iteracoes < MAX_ITER) {
     iteracoes++;
-    // Devolve os blocos do assistant intactos (inclusive os de raciocínio):
-    // editar ou remover qualquer um deles invalida a continuação do turno.
-    messages.push({ role: 'assistant', content: resposta.content });
+    const assistantMsg = resposta.choices[0].message;
+    messages.push(assistantMsg);
 
-    const toolResults = [];
-    for (const bloco of resposta.content) {
-      if (bloco.type !== 'tool_use') continue;
+    for (const toolCall of (assistantMsg.tool_calls || [])) {
+      const nomeTool = toolCall.function.name;
+      let args = {};
+      try { args = JSON.parse(toolCall.function.arguments || '{}'); }
+      catch (e) {
+        logger.warn('tool/args-invalidos', `JSON inválido em ${nomeTool}`, { requestId, telefone, raw: toolCall.function.arguments });
+      }
 
-      const nomeTool = bloco.name;
-      const args = bloco.input || {};
       logger.step(requestId, telefone, `tool/${nomeTool}`, { args });
 
       let resultado;
-      let erro = false;
       try {
         resultado = await executarTool(nomeTool, args, { telefone, ofertaAtiva });
         if (nomeTool === 'chamar_atendente') atendenteChamado = true;
+        if (TOOLS_DE_CARDAPIO.has(nomeTool)) mostrouCardapio = true;
         logger.info(`tool/${nomeTool}/ok`, 'Executada', { requestId, telefone });
-      } catch (e) {
-        erro = true;
-        resultado = `ERRO em ${nomeTool}: ${e.message}. Não invente o resultado. Se não conseguir seguir sem essa informação, chame chamar_atendente.`;
-        logger.error(`tool/${nomeTool}/erro`, e.message, { requestId, telefone, stack: e.stack });
+      } catch (err) {
+        resultado = `ERRO em ${nomeTool}: ${err.message}. Não invente o resultado. Se não conseguir seguir sem essa informação, chame chamar_atendente.`;
+        logger.error(`tool/${nomeTool}/erro`, err.message, { requestId, telefone, stack: err.stack });
       }
 
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: bloco.id,
-        content: String(resultado),
-        ...(erro ? { is_error: true } : {}),
-      });
+      messages.push({ role: 'tool', tool_call_id: toolCall.id, content: String(resultado) });
     }
 
-    messages.push({ role: 'user', content: toolResults });
-
     resposta = await comRetry(
-      () => chamarModelo(client, { systemEstatico: SYSTEM_ESTATICO, contexto, messages }),
-      { tentativas: 3, requestId, etapa: 'claude/create-loop' }
+      () => chamarModelo(client, messages),
+      { tentativas: 3, requestId, etapa: 'openai/create-loop' }
     );
-  }
-
-  // Recusa do modelo por política de segurança: nunca acontece num atendimento
-  // de marmitaria, mas se acontecer não dá pra responder qualquer coisa —
-  // vira caso de atendente humano.
-  if (resposta.stop_reason === 'refusal') {
-    logger.warn('agente/recusa', 'Modelo recusou a requisição', { requestId, telefone });
-    const err = new Error('Modelo recusou responder.');
-    err.precisaAtendente = 'modelo recusou responder a mensagem do cliente';
-    throw err;
   }
 
   if (iteracoes >= MAX_ITER) {
@@ -284,17 +246,16 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     throw err;
   }
 
-  const textoFinal = extrairTexto(resposta);
+  const textoFinal = resposta.choices[0].message?.content?.trim() || '';
   logger.step(requestId, telefone, 'agente/ok', {
     iteracoes,
-    stop_reason: resposta.stop_reason,
+    finish_reason: resposta.choices[0].finish_reason,
     resposta_len: textoFinal.length,
-    tokens_in: resposta.usage?.input_tokens,
-    tokens_cache_read: resposta.usage?.cache_read_input_tokens,
-    tokens_out: resposta.usage?.output_tokens,
+    tokens_in: resposta.usage?.prompt_tokens,
+    tokens_out: resposta.usage?.completion_tokens,
   });
 
-  return { texto: textoFinal, atendenteChamado };
+  return { texto: textoFinal, atendenteChamado, mostrouCardapio };
 }
 
 // ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente, no código) ──────────────
@@ -327,6 +288,7 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
         tipoEntrega:    rascunho.tipo_entrega,
         endereco:       rascunho.endereco,
         formaPagamento: rascunho.forma_pagamento,
+        trocoPara:      rascunho.troco_para,
         itens:          rascunho.itens,
         itensBrinde:    rascunho.itens_brinde,
         cupom:          ofertaAtiva || null,
@@ -355,6 +317,7 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
     total: resultado.total,
     taxa_entrega: resultado.taxaEntrega,
     forma: resultado.formaPagamento,
+    troco_para: resultado.trocoPara,
     cupom_aplicado: resultado.cupomAplicado || null,
     desconto: resultado.desconto || 0,
   });
@@ -370,32 +333,29 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
 async function gerarFollowup(historico, rascunho, requestId, telefone) {
   const client = getClient();
 
-  // A API exige messages não-vazio começando por 'user'. Um histórico que
-  // comece com assistant (ex.: primeira mensagem foi uma oferta enviada pelo
-  // agente de recompra) derrubaria a chamada com 400.
   const msgs = (historico || []).map(h => ({ role: h.role, content: h.content }));
   while (msgs.length && msgs[0].role !== 'user') msgs.shift();
   if (!msgs.length) msgs.push({ role: 'user', content: '(cliente ficou em silêncio)' });
 
   const resposta = await comRetry(
-    () => client.messages.create({
+    () => client.chat.completions.create({
       model: MODEL_AGENTE,
-      max_tokens: 1024,
-      output_config: { effort: 'low' },
-      system: [
-        { type: 'text', text: SYSTEM_ESTATICO, cache_control: { type: 'ephemeral' } },
-        { type: 'text', text: montarContextoDinamico(rascunho, null) },
+      max_completion_tokens: 600,
+      reasoning_effort: 'low',
+      messages: [
+        { role: 'system', content: SYSTEM_ESTATICO },
+        { role: 'system', content: montarContextoDinamico(rascunho, null) },
+        ...msgs,
         {
-          type: 'text',
-          text: 'TAREFA AGORA: o cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando de onde parou — sem inventar informação nova, sem repetir o cardápio inteiro, sem citar valores, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
+          role: 'system',
+          content: 'TAREFA AGORA: o cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando de onde parou — sem inventar informação nova, sem repetir o cardápio inteiro, sem citar valores, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
         },
       ],
-      messages: msgs,
     }),
-    { tentativas: 2, requestId, etapa: 'claude/followup' }
+    { tentativas: 2, requestId, etapa: 'openai/followup' }
   );
 
-  const texto = extrairTexto(resposta);
+  const texto = resposta.choices[0].message?.content?.trim() || '';
   logger.step(requestId, telefone, 'followup/gerado', { chars: texto.length });
   return texto;
 }

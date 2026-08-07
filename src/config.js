@@ -2,34 +2,41 @@
 
 // ─── FONTE ÚNICA DA VERDADE ───────────────────────────────────────────────────
 // Tudo que é número de negócio mora aqui. Antes a taxa de entrega vinha de dois
-// lugares (info_restaurante no banco, com fallback 5 hardcoded) e a LLM ainda
-// escrevia o resumo à mão — foi exatamente assim que o cliente viu R$ 5,00 no
-// "confira seu pedido" e R$ 10,00 no pedido confirmado.
+// lugares (info_restaurante no banco = 10, e um fallback 5 no código) e a LLM
+// ainda escrevia o resumo à mão — foi exatamente assim que o cliente viu
+// R$ 5,00 no "confira seu pedido" e R$ 10,00 no pedido confirmado.
 
-// Taxa FIXA de entrega. O valor do banco (info_restaurante.taxa_entrega) é
-// ignorado de propósito: um único número, num único lugar, não tem como
-// divergir. Para mudar, altere aqui (ou defina TAXA_ENTREGA no .env).
+// Taxa FIXA de entrega. Um único número, num único lugar, não tem como divergir.
+// O EasyPanel define TAXA_ENTREGA=11; o banco também foi atualizado para 11
+// (o painel lê de lá) e o agente confere os dois no boot — ver conferirTaxa().
 const TAXA_ENTREGA = Number(process.env.TAXA_ENTREGA || 11);
 
-// ─── MODELO ───────────────────────────────────────────────────────────────────
-// Claude Opus 5: o modelo mais capaz para trabalho agêntico de longo prazo e
-// seguimento literal de instruções — que é exatamente o que este agente exige.
-const MODEL_AGENTE = process.env.ANTHROPIC_MODEL || 'claude-opus-5';
-const MODEL_VISAO  = process.env.ANTHROPIC_MODEL_VISAO || 'claude-opus-5';
+// ─── MODELO (OpenAI) ──────────────────────────────────────────────────────────
+// gpt-5.6-terra: o ponto de equilíbrio da família 5.6 — qualidade próxima do
+// topo (Sol) por uma fração do custo e bem mais rápido, que é o que um
+// atendimento por WhatsApp precisa. Suporta function calling, structured
+// outputs e entrada de imagem (usado na leitura do comprovante PIX).
+//
+// Se algum dia precisar de mais precisão bruta: ANTHROPIC-free, é só trocar
+// para 'gpt-5.6-sol'. Para cortar custo em volume alto: 'gpt-5.6-luna'.
+const MODEL_AGENTE = process.env.OPENAI_MODEL || 'gpt-5.6-terra';
+const MODEL_VISAO  = process.env.OPENAI_MODEL_VISAO || 'gpt-5.6-terra';
 
-// Effort controla profundidade de raciocínio x latência x custo.
-// 'medium' é o ponto de equilíbrio para atendimento por WhatsApp: raciocínio
-// suficiente para nunca errar item/preço, sem deixar o cliente esperando.
-const EFFORT_AGENTE = process.env.ANTHROPIC_EFFORT || 'medium';
+// Profundidade de raciocínio. 'low' mantém a resposta rápida no WhatsApp —
+// e o trabalho pesado de exatidão (preço, total, taxa) não depende mais do
+// modelo: é código. Suba para 'medium' se notar erro de interpretação.
+const EFFORT_AGENTE = process.env.OPENAI_EFFORT || 'low';
 
-// max_tokens no Opus 5 limita raciocínio + resposta juntos. Folga generosa
-// para a resposta nunca truncar no meio.
-const MAX_TOKENS_AGENTE = Number(process.env.ANTHROPIC_MAX_TOKENS || 4096);
+const MAX_TOKENS_AGENTE = Number(process.env.OPENAI_MAX_TOKENS || 3000);
 
 // ─── ESCALONAMENTO PARA ATENDENTE HUMANO ──────────────────────────────────────
 // Qualquer dúvida real, erro técnico ou situação que a IA não resolve sozinha:
 // alerta no painel + atendimento pausado por 10 minutos.
 const PAUSA_ATENDENTE_MS = Number(process.env.PAUSA_ATENDENTE_MIN || 10) * 60_000;
+
+// Quantas falhas seguidas de áudio antes de chamar gente. Na 1ª o agente pede
+// pra escrever; na 2ª entrega pra um humano.
+const MAX_FALHAS_AUDIO = Number(process.env.MAX_FALHAS_AUDIO || 2);
 
 // ─── FORMATAÇÃO ───────────────────────────────────────────────────────────────
 
@@ -56,6 +63,6 @@ function hojeLocal() {
 module.exports = {
   TAXA_ENTREGA,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
-  PAUSA_ATENDENTE_MS,
+  PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO,
   fmtBRL, money, hojeLocal, TZ,
 };

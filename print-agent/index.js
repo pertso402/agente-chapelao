@@ -149,21 +149,46 @@ function montarCupom(printer, pedido, itens, cliente) {
   printer.bold(false);
   printer.setTextNormal();
 
+  // ── Pagamento ──
+  // Bloco próprio, em corpo grande e cercado por linhas: é a informação que
+  // mais gera confusão na porta do cliente. Em dinheiro, o troco a levar sai
+  // JÁ CALCULADO — ninguém faz conta de cabeça segurando marmita.
   printer.drawLine();
   printer.alignCenter();
-  printer.setTextSize(1, 0);
+  printer.setTextSize(1, 1);
   printer.bold(true);
   printer.println(`PAGAMENTO: ${ROTULO_PAGAMENTO[pedido.forma_pagamento] || String(pedido.forma_pagamento || '').toUpperCase()}`);
   printer.bold(false);
   printer.setTextNormal();
 
-  // Dinheiro é o único caso em que o entregador precisa levar troco.
   if (pedido.forma_pagamento === 'dinheiro') {
-    printer.println('*** LEVAR TROCO ***');
+    const trocoPara = Number(pedido.troco_para);
+    if (Number.isFinite(trocoPara) && trocoPara > 0) {
+      printer.println(`Cliente paga com ${fmtBRL(trocoPara)}`);
+      printer.setTextSize(1, 1);
+      printer.bold(true);
+      printer.println(`LEVAR TROCO: ${fmtBRL(trocoPara - Number(pedido.total))}`);
+      printer.bold(false);
+      printer.setTextNormal();
+    } else if (trocoPara === 0) {
+      printer.setTextSize(1, 0);
+      printer.println('CLIENTE TEM O VALOR CERTO');
+      printer.setTextNormal();
+    } else {
+      // Pedido antigo ou criado sem a pergunta do troco: avisa em vez de
+      // deixar o entregador descobrir na porta.
+      printer.setTextSize(1, 0);
+      printer.bold(true);
+      printer.println('!! TROCO NAO INFORMADO !!');
+      printer.bold(false);
+      printer.setTextNormal();
+    }
+  } else if (pedido.forma_pagamento === 'pix') {
+    printer.println('PIX confirmado no atendimento');
+  } else if (pedido.forma_pagamento === 'cartao') {
+    printer.println('LEVAR MAQUININHA');
   }
-  if (pedido.forma_pagamento === 'pix') {
-    printer.println('(PIX confirmado no atendimento)');
-  }
+  printer.drawLine();
 
   if (pedido.observacao) {
     printer.drawLine();
