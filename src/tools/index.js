@@ -52,8 +52,10 @@ const TOOLS = [
             items: {
               type: 'object',
               properties: {
-                nome:       { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
-                quantidade: { type: 'number' },
+                nome:            { type: 'string', description: 'Nome do produto exatamente como no cardápio' },
+                quantidade:      { type: 'number' },
+                carnes:          { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: carnes escolhidas (máx 2), nomes exatos de buscar_itens_do_dia.' },
+                acompanhamentos: { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: acompanhamentos escolhidos (máx 6), nomes exatos de buscar_itens_do_dia.' },
               },
               required: ['nome', 'quantidade'],
             },
@@ -140,9 +142,9 @@ async function executarTool(nome, args, contexto = {}) {
       if (!itens) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia e ofereça o restante do cardápio (buscar_cardapio).';
 
       let txt = '🌶️ *Marmitex de Hoje*\n\n';
-      if (itens.carne.length) txt += `🥩 *Carnes:* ${itens.carne.join(', ')}\n`;
-      if (itens.base.length) txt += `🍚 *Base:* ${itens.base.join(', ')}\n`;
-      if (itens.acompanhamento.length) txt += `🥗 *Acompanhamentos:* ${itens.acompanhamento.join(', ')}\n`;
+      if (itens.carne.length) txt += `🥩 *Carnes (escolha até 2):* ${itens.carne.join(', ')}\n`;
+      const acompanhamentosTodos = [...itens.base, ...itens.acompanhamento];
+      if (acompanhamentosTodos.length) txt += `🍚 *Acompanhamentos (escolha até 6):* ${acompanhamentosTodos.join(', ')}\n`;
       if (txt === '🌶️ *Marmitex de Hoje*\n\n') return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia.';
 
       return txt.trim();
@@ -176,7 +178,7 @@ async function executarTool(nome, args, contexto = {}) {
         return 'Nada para salvar. Envie pelo menos um campo (itens, nome_cliente, tipo_entrega, endereco ou forma_pagamento).';
       }
 
-      const { rascunho, avaliacao, naoEncontrados } = await db.atualizarRascunho(telefone, campos);
+      const { rascunho, avaliacao, naoEncontrados, avisos } = await db.atualizarRascunho(telefone, campos);
 
       const itens = parseItens(rascunho.itens);
       const subtotal = calcularSubtotal(itens);
@@ -190,7 +192,7 @@ async function executarTool(nome, args, contexto = {}) {
 
       const resumo = {
         salvo: true,
-        itens: itens.map(i => `${i.quantidade}x ${i.nome} (R$ ${Number(i.preco_unitario).toFixed(2)})`),
+        itens: itens.map(i => `${i.quantidade}x ${i.nome}${i.observacao ? ` (${i.observacao})` : ''} (R$ ${Number(i.preco_unitario).toFixed(2)})`),
         brindes: brindes.length ? brindes.map(b => `${b.quantidade}x ${b.nome} (cortesia)`) : undefined,
         subtotal_itens: `R$ ${subtotal.toFixed(2)}`,
         nome: rascunho.nome_cliente || null,
@@ -198,6 +200,10 @@ async function executarTool(nome, args, contexto = {}) {
         endereco: rascunho.endereco || null,
         forma_pagamento: rascunho.forma_pagamento || null,
       };
+
+      if (avisos?.length) {
+        resumo.AVISOS = avisos;
+      }
 
       if (naoEncontrados.length) {
         resumo.ATENCAO_itens_nao_encontrados = naoEncontrados;

@@ -89,21 +89,24 @@ async function atualizarRascunho(telefone, campos) {
   const atual = (await carregarRascunho(telefone)) || {};
 
   let naoEncontrados = [];
+  let avisos = [];
   const merge = { ...campos };
 
   // Se vierem itens, valida contra o catálogo (preço REAL, nome canônico)
   if (campos.itens !== undefined) {
-    const { itens, naoEncontrados: nf } = await validarItens(campos.itens);
+    const { itens, naoEncontrados: nf, avisos: av } = await validarItens(campos.itens);
     merge.itens = JSON.stringify(itens);
     naoEncontrados = nf;
+    avisos = av;
   }
 
   // Brinde passa pela MESMA validação de catálogo: assim a LLM não consegue
   // inventar um item de cortesia que não existe no cardápio.
   if (campos.itens_brinde !== undefined) {
-    const { itens: brindes, naoEncontrados: nfb } = await validarItens(campos.itens_brinde);
+    const { itens: brindes, naoEncontrados: nfb, avisos: avb } = await validarItens(campos.itens_brinde);
     merge.itens_brinde = JSON.stringify(brindes);
     naoEncontrados = naoEncontrados.concat(nfb);
+    avisos = avisos.concat(avb);
   }
 
   // Estado consolidado (atual + novos campos) para avaliar
@@ -116,7 +119,7 @@ async function atualizarRascunho(telefone, campos) {
   await salvarRascunho(telefone, merge);
 
   const rascunho = await carregarRascunho(telefone);
-  return { rascunho, avaliacao, naoEncontrados };
+  return { rascunho, avaliacao, naoEncontrados, avisos };
 }
 
 async function limparRascunho(telefone) {
@@ -226,12 +229,21 @@ function precoFinal(p) {
   return Number(p.preco);
 }
 
+const MAX_CARNES_MARMITEX = 2;
+const MAX_ACOMPANHAMENTOS_MARMITEX = 6;
+
 // Valida itens contra o catálogo: preço real, nome canônico, produto_id.
 // Itens sem correspondência voltam em naoEncontrados (não são salvos).
+// Pra itens de Marmitex, também valida carnes/acompanhamentos escolhidos
+// contra o que está disponível HOJE e aplica o limite de 2 carnes / 6
+// acompanhamentos — nunca confia só no que a LLM mandou. Avisos de corte
+// voltam em avisos, pra o agente informar o cliente (não trunca em silêncio).
 async function validarItens(itensInput) {
   const produtos = await buscarProdutos();
   const itens = [];
   const naoEncontrados = [];
+  const avisos = [];
+  let itensDoDiaCache; // carrega só se algum item de Marmitex precisar
 
   for (const item of parseItens(itensInput)) {
     const alvo = normalizar(item.nome);
@@ -250,16 +262,49 @@ async function validarItens(itensInput) {
       continue;
     }
 
-    itens.push({
+    const itemValidado = {
       produto_id: prod.id,
       nome: prod.nome.trim(),
       quantidade: Math.max(1, Number(item.quantidade) || 1),
       preco_unitario: precoFinal(prod),
       observacao: item.observacao ? String(item.observacao).trim() : null,
-    });
+    };
+
+    const ehMarmitex = (prod.categoria || '').trim() === 'Marmitex';
+    if (ehMarmitex && (item.carnes?.length || item.acompanhamentos?.length)) {
+      if (itensDoDiaCache === undefined) itensDoDiaCache = await buscarItensDoDia();
+      const permitidosCarne = (itensDoDiaCache?.carne || []).map(normalizar);
+      const permitidosAcomp = [...(itensDoDiaCache?.base || []), ...(itensDoDiaCache?.acompanhamento || [])].map(normalizar);
+
+      const carnesPedidas = item.carnes || [];
+      const acompPedidos = item.acompanhamentos || [];
+      const carnesValidas = carnesPedidas.filter(c => permitidosCarne.includes(normalizar(c)));
+      const acompValidos = acompPedidos.filter(a => permitidosAcomp.includes(normalizar(a)));
+
+      const carnesForaDoDia = carnesPedidas.filter(c => !permitidosCarne.includes(normalizar(c)));
+      const acompForaDoDia = acompPedidos.filter(a => !permitidosAcomp.includes(normalizar(a)));
+      if (carnesForaDoDia.length) avisos.push(`Carnes fora do cardápio de hoje (ignoradas): ${carnesForaDoDia.join(', ')}`);
+      if (acompForaDoDia.length) avisos.push(`Acompanhamentos fora do cardápio de hoje (ignorados): ${acompForaDoDia.join(', ')}`);
+
+      const carnesFinal = carnesValidas.slice(0, MAX_CARNES_MARMITEX);
+      const acompFinal = acompValidos.slice(0, MAX_ACOMPANHAMENTOS_MARMITEX);
+      if (carnesValidas.length > MAX_CARNES_MARMITEX) {
+        avisos.push(`Cliente pediu ${carnesValidas.length} carnes, máximo é ${MAX_CARNES_MARMITEX} — mantidas só: ${carnesFinal.join(', ')}. Avise o cliente e pergunte se essas estão OK.`);
+      }
+      if (acompValidos.length > MAX_ACOMPANHAMENTOS_MARMITEX) {
+        avisos.push(`Cliente pediu ${acompValidos.length} acompanhamentos, máximo é ${MAX_ACOMPANHAMENTOS_MARMITEX} — mantidos só: ${acompFinal.join(', ')}. Avise o cliente e pergunte se esses estão OK.`);
+      }
+
+      const partes = [];
+      if (carnesFinal.length) partes.push(`Carnes: ${carnesFinal.join(', ')}`);
+      if (acompFinal.length) partes.push(`Acompanhamentos: ${acompFinal.join(', ')}`);
+      if (partes.length) itemValidado.observacao = partes.join(' | ');
+    }
+
+    itens.push(itemValidado);
   }
 
-  return { itens, naoEncontrados };
+  return { itens, naoEncontrados, avisos };
 }
 
 // Itens do dia (carnes/base/acompanhamentos) — a MESMA fonte que o ERP usa na
