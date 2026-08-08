@@ -589,7 +589,11 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom });
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
-  const canal = cliente.veio_de_anuncio ? 'whatsapp_anuncio' : 'whatsapp_organico';
+  // Canal de origem do pedido, pra medir depois de onde vem cada venda.
+  // Cupom só existe vindo do agente de recompra — é o sinal mais forte de
+  // origem, sobrepõe até anúncio (o cliente pode ter vindo de anúncio há
+  // meses e estar comprando agora por causa de uma oferta de recompra).
+  const canal = cupom ? 'recompra' : (cliente.veio_de_anuncio ? 'whatsapp_anuncio' : 'whatsapp_organico');
 
   // Troco só existe em dinheiro. Zero significa "cliente tem o valor certo" —
   // é informação útil pro entregador, então é gravado como 0 e não como nulo.
