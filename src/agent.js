@@ -7,7 +7,7 @@ const { avaliarRascunho, descreverFaltando, parseItens, rotuloPagamento } = requ
 const { comRetry } = require('./utils/retry');
 const {
   MODEL_AGENTE, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
-  TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, fmtBRL,
+  TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, TEXTO_HORARIO, fmtBRL,
 } = require('./config');
 const logger = require('./logger');
 
@@ -169,7 +169,12 @@ function montarContextoDinamico(rascunho, ofertaAtiva) {
 - Nunca calcule frete por distância, nunca ofereça isenção fora desta regra, nunca prometa frete grátis abaixo de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)}.
 
 ## PRAZO DA CONDIÇÃO
-A condição de primeira compra vale ${prazoOfertaTexto()}. Use isso para o cliente decidir agora, sem inventar outro prazo.`);
+A condição de primeira compra vale ${prazoOfertaTexto()}. Use isso para o cliente decidir agora, sem inventar outro prazo.
+
+## HORÁRIO
+Atendemos ${TEXTO_HORARIO}. Se você está conversando agora, é porque está DENTRO do horário — pode montar o pedido normalmente. Fora do horário o sistema responde sozinho, você nem é chamado.
+Se o cliente perguntar o horário, informe exatamente: ${TEXTO_HORARIO}.
+Se ele pedir pra agendar para outro dia ou fora do horário, chame chamar_atendente — agendamento não é decisão sua.`);
 
   if (ofertaAtiva && ofertaAtiva.tipo === 'brinde') {
     const permitidos = ofertaAtiva.itens_permitidos || [];
@@ -207,7 +212,23 @@ Este cliente recebeu uma mensagem de recompra com o cupom *${ofertaAtiva.codigo}
 // que é código e não depende de modelo nenhum.
 const MODELO_RESERVA = process.env.OPENAI_MODEL_RESERVA || 'gpt-4o';
 let modeloAtivo = MODEL_AGENTE;
+
+// Dois ajustes INDEPENDENTES. Amarrar os dois foi um erro que quebrou a
+// produção: um 400 em `reasoning_effort` fazia o código trocar
+// `max_completion_tokens` por `max_tokens`, e aí o GPT-5.6 recusava a chamada
+// seguinte ("'max_tokens' is not supported with this model").
+//   - efeitoEffort:  manda ou não `reasoning_effort`
+//   - tokensLegado:  usa `max_tokens` (modelo antigo) em vez de
+//                    `max_completion_tokens` (família 5.x / o-series)
 let usaEffort = true;
+let tokensLegado = !usaApiNova(MODEL_AGENTE);
+
+// A família 5.x e os modelos "o" usam max_completion_tokens e aceitam
+// reasoning_effort. Detectar pelo nome evita descobrir isso por tentativa e
+// erro em cima do cliente.
+function usaApiNova(modelo) {
+  return /^(gpt-5|o[1-9])/i.test(String(modelo || ''));
+}
 
 function erroDeModeloIndisponivel(err) {
   const msg = String(err?.message || '').toLowerCase();
@@ -217,9 +238,21 @@ function erroDeModeloIndisponivel(err) {
     || /does not exist|do not have access|unsupported model|unknown model/.test(msg);
 }
 
-function erroDeParametro(err) {
+// 400 reclamando de reasoning_effort → só tira o effort, mantém o resto.
+function erroDeEffort(err) {
   const msg = String(err?.message || '').toLowerCase();
-  return err?.status === 400 && /reasoning_effort|max_completion_tokens|unsupported parameter|unrecognized/.test(msg);
+  return err?.status === 400 && msg.includes('reasoning_effort');
+}
+
+// 400 reclamando do parâmetro de tokens → troca o NOME do parâmetro, nos dois
+// sentidos: modelo novo pedindo max_completion_tokens, ou antigo pedindo
+// max_tokens.
+function erroDeTokens(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  if (err?.status !== 400) return null;
+  if (msg.includes("'max_tokens'") && msg.includes('max_completion_tokens')) return 'novo';
+  if (msg.includes("'max_completion_tokens'")) return 'legado';
+  return null;
 }
 
 function montarPayload(messages) {
@@ -232,65 +265,91 @@ function montarPayload(messages) {
     // duas tools em paralelo poderiam se atropelar no mesmo estado.
     parallel_tool_calls: false,
   };
-  if (usaEffort) {
-    payload.max_completion_tokens = MAX_TOKENS_AGENTE;
-    payload.reasoning_effort = EFFORT_AGENTE;
-  } else {
-    // Modelos anteriores ao 5.x não conhecem reasoning_effort e usam o
-    // parâmetro antigo de limite de saída.
-    payload.max_tokens = MAX_TOKENS_AGENTE;
-  }
+  if (tokensLegado) payload.max_tokens = MAX_TOKENS_AGENTE;
+  else payload.max_completion_tokens = MAX_TOKENS_AGENTE;
+  if (usaEffort && !tokensLegado) payload.reasoning_effort = EFFORT_AGENTE;
   return payload;
 }
 
+// Tenta, corrige o que a API reclamar e tenta de novo. No máximo 3 correções,
+// pra nunca virar laço infinito em cima de um erro que não é de parâmetro.
 async function chamarModelo(client, messages) {
-  try {
-    return await client.chat.completions.create(montarPayload(messages));
-  } catch (err) {
-    if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
-      logger.error('agente/modelo-indisponivel',
-        `Sem acesso a "${modeloAtivo}" — caindo para "${MODELO_RESERVA}". Confira o plano da conta OpenAI.`,
-        { erro: err.message });
-      modeloAtivo = MODELO_RESERVA;
-      usaEffort = false;
-      return client.chat.completions.create(montarPayload(messages));
+  for (let tentativa = 0; tentativa < 4; tentativa++) {
+    try {
+      return await client.chat.completions.create(montarPayload(messages));
+    } catch (err) {
+      const tipoTokens = erroDeTokens(err);
+
+      if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
+        logger.error('agente/modelo-indisponivel',
+          `Sem acesso a "${modeloAtivo}" — caindo para "${MODELO_RESERVA}". Confira o plano da conta OpenAI.`,
+          { erro: err.message });
+        modeloAtivo = MODELO_RESERVA;
+        tokensLegado = !usaApiNova(MODELO_RESERVA);
+        usaEffort = usaApiNova(MODELO_RESERVA);
+        continue;
+      }
+
+      if (tipoTokens === 'novo' && tokensLegado) {
+        logger.error('agente/tokens-param', `"${modeloAtivo}" exige max_completion_tokens — corrigindo.`, { erro: err.message });
+        tokensLegado = false;
+        continue;
+      }
+      if (tipoTokens === 'legado' && !tokensLegado) {
+        logger.error('agente/tokens-param', `"${modeloAtivo}" exige max_tokens — corrigindo.`, { erro: err.message });
+        tokensLegado = true;
+        usaEffort = false; // quem usa max_tokens não conhece reasoning_effort
+        continue;
+      }
+
+      if (erroDeEffort(err) && usaEffort) {
+        logger.error('agente/effort-recusado',
+          `"${modeloAtivo}" recusou reasoning_effort="${EFFORT_AGENTE}" — repetindo sem ele.`,
+          { erro: err.message });
+        usaEffort = false;
+        continue;
+      }
+
+      throw err;
     }
-    if (erroDeParametro(err) && usaEffort) {
-      logger.error('agente/parametro-recusado',
-        `"${modeloAtivo}" recusou reasoning_effort — repetindo sem ele.`,
-        { erro: err.message });
-      usaEffort = false;
-      return client.chat.completions.create(montarPayload(messages));
-    }
-    throw err;
   }
+  throw new Error('Não consegui ajustar os parâmetros da chamada ao modelo.');
 }
 
-// Chamada sem tools (follow-up). Mesma proteção de fallback do agente.
+// Chamada sem tools (follow-up). Mesma correção de parâmetros do agente.
 async function chamarModeloSimples(client, maxTokens, messages) {
-  const monta = () => (usaEffort
-    ? { model: modeloAtivo, messages, max_completion_tokens: maxTokens, reasoning_effort: 'low' }
-    : { model: modeloAtivo, messages, max_tokens: maxTokens });
+  const monta = () => {
+    const p = { model: modeloAtivo, messages };
+    if (tokensLegado) p.max_tokens = maxTokens;
+    else p.max_completion_tokens = maxTokens;
+    if (usaEffort && !tokensLegado) p.reasoning_effort = 'low';
+    return p;
+  };
 
-  try {
-    return await client.chat.completions.create(monta());
-  } catch (err) {
-    if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
-      modeloAtivo = MODELO_RESERVA;
-      usaEffort = false;
-      return client.chat.completions.create(monta());
+  for (let tentativa = 0; tentativa < 4; tentativa++) {
+    try {
+      return await client.chat.completions.create(monta());
+    } catch (err) {
+      const tipoTokens = erroDeTokens(err);
+
+      if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
+        modeloAtivo = MODELO_RESERVA;
+        tokensLegado = !usaApiNova(MODELO_RESERVA);
+        usaEffort = usaApiNova(MODELO_RESERVA);
+        continue;
+      }
+      if (tipoTokens === 'novo' && tokensLegado) { tokensLegado = false; continue; }
+      if (tipoTokens === 'legado' && !tokensLegado) { tokensLegado = true; usaEffort = false; continue; }
+      if (erroDeEffort(err) && usaEffort) { usaEffort = false; continue; }
+      throw err;
     }
-    if (erroDeParametro(err) && usaEffort) {
-      usaEffort = false;
-      return client.chat.completions.create(monta());
-    }
-    throw err;
   }
+  throw new Error('Não consegui ajustar os parâmetros da chamada ao modelo.');
 }
 
 // Exposto no /health pra dar pra ver, de fora, se o fallback entrou em ação.
 function modeloEmUso() {
-  return { configurado: MODEL_AGENTE, em_uso: modeloAtivo, usando_effort: usaEffort };
+  return { configurado: MODEL_AGENTE, em_uso: modeloAtivo, usando_effort: usaEffort, param_tokens: tokensLegado ? 'max_tokens' : 'max_completion_tokens' };
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -481,4 +540,17 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
   return texto;
 }
 
-module.exports = { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, SYSTEM_ESTATICO, montarContextoDinamico };
+module.exports = {
+  rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso,
+  SYSTEM_ESTATICO, montarContextoDinamico,
+  // Exposto só para o teste de regressão dos parâmetros do modelo — foi um
+  // erro aqui que derrubou o atendimento em produção.
+  _testes: {
+    chamarModelo, montarPayload,
+    resetar(modelo) {
+      modeloAtivo = modelo || MODEL_AGENTE;
+      tokensLegado = !usaApiNova(modeloAtivo);
+      usaEffort = usaApiNova(modeloAtivo);
+    },
+  },
+};

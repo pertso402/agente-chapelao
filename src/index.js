@@ -18,7 +18,10 @@ const {
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
-const { PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money, MODEL_AGENTE } = require('./config');
+const {
+  PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
+  dentroDoHorario, quandoAbreTexto, horaLocal, TEXTO_HORARIO,
+} = require('./config');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -69,6 +72,34 @@ async function escalarParaAtendente(telefone, motivo, requestId, { mensagemClien
 
 const MSG_ATENDENTE_PADRAO =
   'Opa, deixa eu chamar alguém da equipe pra te ajudar com isso 🙋 Um atendente assume nossa conversa em instantes, tá? 🎩';
+
+// ─── FORA DO HORÁRIO DE ATENDIMENTO ───────────────────────────────────────────
+// Trava de código, não instrução de prompt: a LLM cede quando o cliente
+// insiste ("só hoje, por favor"), e aí a cozinha recebe pedido de madrugada.
+//
+// Quem escreve fora do horário recebe UMA resposta educada com o horário. As
+// mensagens seguintes ficam em silêncio por um tempo — responder cinco vezes
+// seguidas "estamos fechados" é pior do que não responder.
+const JANELA_AVISO_FECHADO_MS = 60 * 60_000;
+const avisoFechadoEnviado = new Map(); // telefone -> timestamp
+
+function jaAvisouQueEstaFechado(telefone) {
+  const agora = Date.now();
+  for (const [tel, ts] of avisoFechadoEnviado) {
+    if (agora - ts > JANELA_AVISO_FECHADO_MS) avisoFechadoEnviado.delete(tel);
+  }
+  const ultimo = avisoFechadoEnviado.get(telefone);
+  if (ultimo && agora - ultimo < JANELA_AVISO_FECHADO_MS) return true;
+  avisoFechadoEnviado.set(telefone, agora);
+  return false;
+}
+
+function mensagemForaDoHorario(pushName) {
+  const nome = pushName && pushName !== 'Cliente' ? `, ${pushName}` : '';
+  return `Oi${nome}! 🎩 No momento a gente não está atendendo.\n\n` +
+    `🕚 Nosso horário é ${TEXTO_HORARIO}.\n\n` +
+    `Volto a te atender ${quandoAbreTexto()} — me chama que eu já separo sua marmita quentinha! 😋`;
+}
 
 // ─── FILA POR TELEFONE ─────────────────────────────────────────────────────────
 // Evita que 2+ mensagens do MESMO cliente, chegando rápido uma atrás da outra
@@ -149,6 +180,12 @@ app.get('/health', (_req, res) => {
     // fallback tiver entrado em ação (conta sem acesso ao modelo novo), dá
     // pra ver aqui de fora, sem precisar caçar no log.
     modelo: modeloEmUso(),
+    atendimento: {
+      horario: TEXTO_HORARIO,
+      aberto_agora: dentroDoHorario(),
+      hora_local: (() => { const { hora, minuto } = horaLocal();
+        return `${String(hora).padStart(2, '0')}:${String(minuto).padStart(2, '0')}`; })(),
+    },
     vars: {
       supa: !!process.env.SUPA_URL,
       openai: !!process.env.OPENAI_API_KEY,
@@ -380,6 +417,25 @@ async function processarMensagem(msg, requestId) {
       }
     }
 
+    // ── PORTÃO: fora do horário de atendimento ───────────────────────────────
+    // Depois do comprovante PIX (dinheiro que já saiu da conta do cliente
+    // precisa ser reconhecido a qualquer hora) e antes de qualquer coisa que
+    // crie ou altere pedido.
+    if (!dentroDoHorario()) {
+      const { hora, minuto } = horaLocal();
+      logger.info('horario/fechado', 'Mensagem fora do horário de atendimento', {
+        requestId, telefone, hora_local: `${String(hora).padStart(2, '0')}:${String(minuto).padStart(2, '0')}`,
+      });
+
+      if (jaAvisouQueEstaFechado(telefone)) {
+        logger.info('horario/aviso-ja-enviado', 'Silêncio: cliente já foi avisado na última hora', { requestId, telefone });
+        return;
+      }
+
+      await responder(telefone, mensagemForaDoHorario(pushName), { requestId, etapa: 'foraDoHorario' });
+      return;
+    }
+
     // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
     // Determinístico — continua funcionando mesmo com o atendimento pausado.
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
@@ -535,6 +591,11 @@ const TRAVADO_WATCHDOG_MS = 2 * 60_000;
 const ETAPAS_QUENTES = new Set(['coletando_dados', 'aguardando_confirmacao']);
 
 async function pollarFollowups() {
+  // Follow-up é mensagem que o restaurante manda sem o cliente pedir. Fora do
+  // horário isso não é retomada de venda, é incômodo — e a conversa não teria
+  // como avançar mesmo, porque o portão de horário bloqueia a resposta dele.
+  if (!dentroDoHorario()) return;
+
   // Reivindica pela janela mais larga e filtra aqui: o banco não sabe a regra
   // de temperatura, e uma query só evita duas rodadas de claim concorrentes.
   const candidatos = (await reivindicarFollowups(SILENCIO_QUENTE_MS)).filter(r => {
@@ -605,10 +666,11 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info('servidor/start', `🎩 Agente Chapelão rodando na porta ${PORT}`, {
     port: PORT,
-    modelo:    MODEL_AGENTE,
-    supa_url:  process.env.SUPA_URL          ? '✓' : '✗ FALTANDO',
-    anthropic: process.env.ANTHROPIC_API_KEY ? '✓' : '✗ FALTANDO (agente + visão)',
-    openai:    process.env.OPENAI_API_KEY    ? '✓' : '✗ FALTANDO (transcrição de áudio)',
-    evolution: process.env.EVOLUTION_URL     ? '✓' : '✗ FALTANDO',
+    modelo:    modeloEmUso(),
+    horario:   TEXTO_HORARIO,
+    aberto_agora: dentroDoHorario(),
+    supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
+    openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO (agente, visão e áudio)',
+    evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
   });
 });

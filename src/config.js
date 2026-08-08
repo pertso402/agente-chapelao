@@ -82,6 +82,58 @@ function diaDaSemanaLocal() {
   return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(nome);
 }
 
+// ─── HORÁRIO DE FUNCIONAMENTO ─────────────────────────────────────────────────
+// Segunda a sábado, 11h às 14h. Fora disso o agente não monta pedido: avisa o
+// horário e encerra com educação.
+//
+// Isto é uma trava de CÓDIGO, não uma instrução de prompt. Instrução de prompt
+// a LLM contorna quando o cliente insiste ("mas só hoje, por favor"), e aí a
+// cozinha recebe pedido de madrugada.
+const ABRE_HORA = Number(process.env.ABRE_HORA || 11);
+const FECHA_HORA = Number(process.env.FECHA_HORA || 14);
+// 0=domingo … 6=sábado. Padrão: segunda a sábado.
+const DIAS_ABERTOS = (process.env.DIAS_ABERTOS || '1,2,3,4,5,6')
+  .split(',').map(d => Number(d.trim())).filter(Number.isInteger);
+
+const TEXTO_HORARIO = process.env.TEXTO_HORARIO
+  || `de segunda a sábado, das ${String(ABRE_HORA).padStart(2, '0')}h às ${String(FECHA_HORA).padStart(2, '0')}h`;
+
+// Hora e minuto no fuso do restaurante — nunca no fuso do servidor, que roda
+// em UTC e acharia que 11h de Umuarama é 14h.
+function horaLocal() {
+  const partes = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const pega = (t) => Number(partes.find(p => p.type === t)?.value || 0);
+  return { hora: pega('hour'), minuto: pega('minute') };
+}
+
+// Aberto = dia da semana permitido E dentro da janela. O fechamento é no
+// minuto exato: às 14h00 já está fechado.
+function dentroDoHorario() {
+  const dia = diaDaSemanaLocal();
+  if (!DIAS_ABERTOS.includes(dia)) return false;
+  const { hora } = horaLocal();
+  return hora >= ABRE_HORA && hora < FECHA_HORA;
+}
+
+// Frase de quando volta a atender, pra mensagem não terminar em beco sem saída.
+function quandoAbreTexto() {
+  const dia = diaDaSemanaLocal();
+  const { hora } = horaLocal();
+  const abreHoje = DIAS_ABERTOS.includes(dia) && hora < ABRE_HORA;
+  if (abreHoje) return `hoje às ${ABRE_HORA}h`;
+
+  // Procura o próximo dia aberto a partir de amanhã.
+  for (let i = 1; i <= 7; i++) {
+    const proximo = (dia + i) % 7;
+    if (!DIAS_ABERTOS.includes(proximo)) continue;
+    const quando = i === 1 ? 'amanhã' : DIAS_SEMANA[proximo];
+    return `${quando} às ${ABRE_HORA}h`;
+  }
+  return `às ${ABRE_HORA}h`;
+}
+
 // Texto do prazo pronto pro agente usar. Domingo é o corte da semana.
 function prazoOfertaTexto() {
   const hoje = diaDaSemanaLocal();
@@ -93,6 +145,8 @@ function prazoOfertaTexto() {
 
 module.exports = {
   TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, diaDaSemanaLocal,
+  ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, TEXTO_HORARIO,
+  dentroDoHorario, quandoAbreTexto, horaLocal,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO,
   fmtBRL, money, hojeLocal, TZ,
