@@ -6,10 +6,11 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js",
+    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js && node --check scripts/testar-loja.js",
     "test:precos": "node scripts/testar-precos.js",
     "test:modelo": "node scripts/testar-modelo.js",
-    "test": "npm run test:precos && npm run test:modelo"
+    "test": "npm run test:precos && npm run test:modelo && npm run test:loja",
+    "test:loja": "node scripts/testar-loja.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

@@ -134,6 +134,39 @@ function quandoAbreTexto() {
   return `às ${ABRE_HORA}h`;
 }
 
+// ─── DECISÃO DE ABRIR/FECHAR A LOJA ───────────────────────────────────────────
+// Função PURA (não toca banco nem relógio) porque um erro de borda aqui custa
+// um dia inteiro de vendas: reabrir uma loja que a cozinha fechou porque acabou
+// a comida, ou fechar na cara de quem está testando às 9h.
+//
+// Regras:
+//   - Abre uma vez por dia, ao entrar na janela, se ainda não abriu hoje.
+//   - Fecha uma vez por dia, DEPOIS do horário de encerrar, se ainda não
+//     fechou hoje. Antes de abrir, não mexe: a manhã fica livre pra testes.
+//   - "Uma vez por dia" é o que impede a automação de desfazer um clique
+//     manual feito no meio do expediente.
+//
+// Devolve: { acao: 'abrir' | 'fechar' | null, marcador: chave|null }
+function decidirLoja({ hora, diaUtil, hoje, marcadorAbertura, marcadorFechamento, lojaAberta }) {
+  const dentroDaJanela = diaUtil && hora >= ABRE_HORA && hora < FECHA_HORA;
+
+  if (dentroDaJanela) {
+    if (marcadorAbertura !== hoje) {
+      return { acao: 'abrir', marcador: 'loja_auto_abertura' };
+    }
+    return { acao: null, marcador: null };
+  }
+
+  // Fora da janela: só fecha DEPOIS do expediente (ou em dia não útil).
+  // Antes de ABRE_HORA num dia útil, não faz nada.
+  const depoisDoExpediente = !diaUtil || hora >= FECHA_HORA;
+  if (depoisDoExpediente && marcadorFechamento !== hoje) {
+    return { acao: lojaAberta ? 'fechar' : 'so-marcar', marcador: 'loja_auto_fechamento' };
+  }
+
+  return { acao: null, marcador: null };
+}
+
 // Texto do prazo pronto pro agente usar. Domingo é o corte da semana.
 function prazoOfertaTexto() {
   const hoje = diaDaSemanaLocal();
@@ -146,7 +179,7 @@ function prazoOfertaTexto() {
 module.exports = {
   TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, diaDaSemanaLocal,
   ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, TEXTO_HORARIO,
-  dentroDoHorario, quandoAbreTexto, horaLocal,
+  dentroDoHorario, quandoAbreTexto, horaLocal, decidirLoja,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO,
   fmtBRL, money, hojeLocal, TZ,

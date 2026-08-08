@@ -13,6 +13,7 @@ const {
   buscarInfo, atualizarStatusPedido, buscarPedidoPendente, buscarVideoBuffet,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
+  buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso } = require('./agent');
@@ -20,7 +21,8 @@ const { comRetry } = require('./utils/retry');
 const { normalizar } = require('./utils/pedido');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
-  dentroDoHorario, quandoAbreTexto, horaLocal, TEXTO_HORARIO,
+  dentroDoHorario, quandoAbreTexto, horaLocal, hojeLocal, TEXTO_HORARIO,
+  ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, diaDaSemanaLocal,
 } = require('./config');
 
 const app = express();
@@ -417,13 +419,25 @@ async function processarMensagem(msg, requestId) {
       }
     }
 
-    // ── PORTÃO: fora do horário de atendimento ───────────────────────────────
-    // Depois do comprovante PIX (dinheiro que já saiu da conta do cliente
-    // precisa ser reconhecido a qualquer hora) e antes de qualquer coisa que
-    // crie ou altere pedido.
-    if (!dentroDoHorario()) {
+    // ── PORTÃO: a loja está aberta? ──────────────────────────────────────────
+    // Quem manda é o botão "Aberta/Fechada" do painel. O horário (11h–14h) age
+    // sobre ESSE botão, não sobre a conversa — ver sincronizarLoja() no poller.
+    //
+    // Fazer assim tem duas vantagens: a cozinha fecha na hora que quiser com um
+    // clique (acabou a comida, feriado), e dá pra abrir fora do horário para
+    // testar sem mexer em variável de ambiente nem publicar nada.
+    //
+    // Vem depois do comprovante PIX de propósito: dinheiro que já saiu da conta
+    // do cliente precisa ser reconhecido a qualquer hora, loja aberta ou não.
+    const lojaAberta = await buscarLojaAberta().catch(err => {
+      // Falha ao consultar não pode calar o atendimento — na dúvida, atende.
+      logger.warn('loja/consulta-falhou', err.message, { requestId, telefone });
+      return true;
+    });
+
+    if (!lojaAberta) {
       const { hora, minuto } = horaLocal();
-      logger.info('horario/fechado', 'Mensagem fora do horário de atendimento', {
+      logger.info('horario/fechado', 'Mensagem com a loja fechada', {
         requestId, telefone, hora_local: `${String(hora).padStart(2, '0')}:${String(minuto).padStart(2, '0')}`,
       });
 
@@ -590,11 +604,58 @@ const TRAVADO_WATCHDOG_MS = 2 * 60_000;
 // Etapas em que o cliente já demonstrou intenção real de compra.
 const ETAPAS_QUENTES = new Set(['coletando_dados', 'aguardando_confirmacao']);
 
+// ─── ABERTURA E FECHAMENTO AUTOMÁTICOS ────────────────────────────────────────
+// O botão do painel é a chave mestra; esta rotina só o gira nos horários.
+//
+//   11h (seg–sáb) → liga o botão, se ele ainda não foi ligado hoje
+//   depois das 14h → desliga o botão, se ele ainda não foi desligado hoje
+//
+// O "se ainda não foi hoje" é o detalhe que faz isso ser útil em vez de
+// irritante: se a cozinha fechar manualmente ao meio-dia porque acabou a
+// comida, a rotina NÃO reabre — a abertura de hoje já aconteceu. E se você
+// abrir às 9h pra testar, ela não fecha na sua cara: o fechamento só ocorre
+// depois das 14h.
+//
+// Os marcadores ficam no banco, não em memória: o container reinicia a cada
+// publicação e a automação não pode rodar duas vezes no mesmo dia.
+async function sincronizarLoja() {
+  try {
+    const hoje = hojeLocal();
+    const { hora } = horaLocal();
+
+    const [marcadorAbertura, marcadorFechamento, lojaAberta] = await Promise.all([
+      lerMarcador('loja_auto_abertura'),
+      lerMarcador('loja_auto_fechamento'),
+      buscarLojaAberta(),
+    ]);
+
+    const { acao, marcador } = decidirLoja({
+      hora, hoje, lojaAberta,
+      diaUtil: DIAS_ABERTOS.includes(diaDaSemanaLocal()),
+      marcadorAbertura, marcadorFechamento,
+    });
+    if (!acao) return;
+
+    if (acao === 'abrir') {
+      await definirLojaAberta(true);
+      logger.info('loja/aberta-automaticamente', `Loja aberta pelo horário (${ABRE_HORA}h)`, { hoje });
+    } else if (acao === 'fechar') {
+      await definirLojaAberta(false);
+      logger.info('loja/fechada-automaticamente', `Loja fechada pelo horário (${FECHA_HORA}h)`, { hoje });
+    }
+    // 'so-marcar': já estava fechada, só registra que o fechamento de hoje
+    // aconteceu — pra não ficar reavaliando isso a cada minuto.
+    await gravarMarcador(marcador, hoje);
+  } catch (err) {
+    logger.error('loja/sincronizar-falhou', err.message, { stack: err.stack });
+  }
+}
+
 async function pollarFollowups() {
-  // Follow-up é mensagem que o restaurante manda sem o cliente pedir. Fora do
-  // horário isso não é retomada de venda, é incômodo — e a conversa não teria
-  // como avançar mesmo, porque o portão de horário bloqueia a resposta dele.
-  if (!dentroDoHorario()) return;
+  // Follow-up é mensagem que o restaurante manda sem o cliente pedir. Com a
+  // loja fechada isso não é retomada de venda, é incômodo — e a conversa não
+  // teria como avançar, porque o portão bloqueia a resposta dele.
+  if (!(await buscarLojaAberta().catch(() => false))) return;
 
   // Reivindica pela janela mais larga e filtra aqui: o banco não sabe a regra
   // de temperatura, e uma query só evita duas rodadas de claim concorrentes.
@@ -650,6 +711,7 @@ async function pollar() {
   if (pollando) return;
   pollando = true;
   try {
+    await sincronizarLoja();
     await pollarFollowups();
     await pollarTravados();
     logger.info('poller/heartbeat', 'Ciclo do poller concluído', {});

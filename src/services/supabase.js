@@ -397,6 +397,60 @@ async function buscarVideoBuffet() {
   return { url: data.video_url, tipo: data.tipo === 'image' ? 'image' : 'video' };
 }
 
+// ─── CHAVE MESTRA: LOJA ABERTA / FECHADA ──────────────────────────────────────
+// O botão "Aberta/Fechada" do painel é quem manda. O agente lê essa chave a
+// cada mensagem, então um clique na cozinha tem efeito imediato — inclusive
+// para testar fora do horário.
+//
+// Cache curto: sem ele seria uma consulta por mensagem recebida. 15s é rápido
+// o bastante pra ninguém perceber o clique demorando, e evita martelar o banco
+// numa rajada de mensagens.
+const CACHE_LOJA_MS = 15_000;
+let cacheLoja = { valor: null, ts: 0 };
+
+async function buscarLojaAberta() {
+  if (cacheLoja.valor !== null && Date.now() - cacheLoja.ts < CACHE_LOJA_MS) {
+    return cacheLoja.valor;
+  }
+  const { data, error } = await sb
+    .from('info_restaurante')
+    .select('valor')
+    .eq('chave', 'loja_aberta')
+    .maybeSingle();
+
+  if (error) throw new Error(`Supabase/buscarLojaAberta: ${error.message}`);
+
+  // Chave ausente conta como ABERTA: melhor atender de mais do que ficar mudo
+  // por causa de uma linha que alguém apagou sem querer.
+  const aberta = data?.valor == null ? true : String(data.valor) !== 'false';
+  cacheLoja = { valor: aberta, ts: Date.now() };
+  return aberta;
+}
+
+async function definirLojaAberta(aberta) {
+  const { error } = await sb
+    .from('info_restaurante')
+    .upsert({ chave: 'loja_aberta', valor: aberta ? 'true' : 'false' }, { onConflict: 'chave' });
+  if (error) throw new Error(`Supabase/definirLojaAberta: ${error.message}`);
+  cacheLoja = { valor: aberta, ts: Date.now() };
+}
+
+// Marcadores de "já fiz a abertura/fechamento automático de hoje". Guardados
+// no banco (e não em memória) porque o container reinicia a cada deploy e a
+// automação não pode rodar duas vezes no mesmo dia — senão reabriria uma loja
+// que a cozinha fechou de propósito.
+async function lerMarcador(chave) {
+  const { data } = await sb.from('info_restaurante').select('valor').eq('chave', chave).maybeSingle();
+  return data?.valor || null;
+}
+
+async function gravarMarcador(chave, valor) {
+  const { error } = await sb
+    .from('info_restaurante')
+    .upsert({ chave, valor }, { onConflict: 'chave' });
+  if (error) throw new Error(`Supabase/gravarMarcador(${chave}): ${error.message}`);
+}
+
 async function buscarInfo() {
   const { data, error } = await sb.from('info_restaurante').select('chave, valor');
   if (error) throw new Error(`Supabase/buscarInfo: ${error.message}`);
@@ -720,6 +774,7 @@ module.exports = {
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
   buscarVideoBuffet, precificarPedido,
+  buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
   atualizarStatusPedido, buscarPedidoPendente,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
