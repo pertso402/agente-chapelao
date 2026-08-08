@@ -5,7 +5,7 @@
 // do pedido E para calcular/renderizar o dinheiro. O CÓDIGO (não a LLM) é a
 // fonte da verdade sobre o que falta e sobre quanto custa.
 
-const { TAXA_ENTREGA, fmtBRL, money } = require('../config');
+const { TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, fmtBRL, money } = require('../config');
 
 function normalizar(s) {
   return String(s || '')
@@ -76,7 +76,20 @@ function calcularSubtotal(itens) {
 
 function calcularTotais({ itens, tipoEntrega, cupom }) {
   const subtotal = calcularSubtotal(itens);
-  const taxaEntrega = tipoEntrega === 'delivery' ? money(TAXA_ENTREGA) : 0;
+
+  // Frete grátis acima do limite. É regra de negócio fixa: aplicada aqui, no
+  // mesmo cálculo que gera o resumo e o pedido, então não tem como o cliente
+  // ver "grátis" na tela e ser cobrado depois.
+  const ehDelivery = tipoEntrega === 'delivery';
+  const freteGratis = ehDelivery && subtotal >= FRETE_GRATIS_ACIMA_DE;
+  const taxaEntrega = (ehDelivery && !freteGratis) ? money(TAXA_ENTREGA) : 0;
+
+  // Quanto falta pro frete sair de graça. É o número que transforma
+  // "quanto é a entrega?" em "faltam R$ 8 e a entrega sai de graça" — o
+  // agente recebe isso pronto e nunca calcula por conta própria.
+  const faltaParaFreteGratis = (ehDelivery && !freteGratis)
+    ? money(FRETE_GRATIS_ACIMA_DE - subtotal)
+    : 0;
 
   // Cupom de brinde não abate percentual — o benefício são os itens grátis.
   const ehBrinde = cupom?.tipo === 'brinde';
@@ -85,7 +98,7 @@ function calcularTotais({ itens, tipoEntrega, cupom }) {
     : 0;
 
   const total = money(subtotal + taxaEntrega - desconto);
-  return { subtotal, taxaEntrega, desconto, total };
+  return { subtotal, taxaEntrega, desconto, total, freteGratis, faltaParaFreteGratis };
 }
 
 // ─── RESUMO FINAL (texto pronto pro WhatsApp) ─────────────────────────────────
@@ -126,7 +139,10 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   linhas.push(`💳 Pagamento: ${rotuloPagamento(formaPagamento)}`);
   linhas.push('');
   linhas.push(`🛍️ Subtotal: ${fmtBRL(totais.subtotal)}`);
-  if (totais.taxaEntrega > 0) linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
+  // Frete grátis aparece como linha própria, e não some da conta: o cliente
+  // precisa VER o benefício que ganhou, senão ele não existe pra ele.
+  if (totais.freteGratis) linhas.push('🚴 Entrega: *GRÁTIS* 🎉');
+  else if (totais.taxaEntrega > 0) linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
   if (totais.desconto > 0)    linhas.push(`🏷️ Desconto${cupomCodigo ? ` (${cupomCodigo})` : ''}: -${fmtBRL(totais.desconto)}`);
   linhas.push(`💰 *Total: ${fmtBRL(totais.total)}*`);
 

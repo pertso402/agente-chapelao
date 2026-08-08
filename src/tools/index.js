@@ -1,8 +1,8 @@
 'use strict';
 
 const db = require('../services/supabase');
-const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho } = require('../utils/pedido');
-const { TAXA_ENTREGA, PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
+const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularTotais } = require('../utils/pedido');
+const { TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = { 'marmitex': 0, 'combos': 1, 'combo': 1, 'maioneses': 8, 'bebidas': 9 };
@@ -162,6 +162,8 @@ async function executarTool(nome, args, contexto = {}) {
         // Taxa vem de src/config.js — valor fixo e único do sistema. O campo
         // taxa_entrega do banco é ignorado de propósito.
         taxa_entrega_reais: TAXA_ENTREGA,
+        frete_gratis_acima_de_reais: FRETE_GRATIS_ACIMA_DE,
+        observacao_frete: `A entrega custa ${fmtBRL(TAXA_ENTREGA)} para qualquer endereço, MAS é GRÁTIS em pedidos acima de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)}. Nunca cite a taxa sozinha: cite sempre junto com o frete grátis, porque é isso que faz o cliente aumentar o pedido em vez de desistir.`,
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
       });
     }
@@ -214,6 +216,27 @@ async function executarTool(nome, args, contexto = {}) {
       };
 
       if (avisos?.length) resumo.AVISOS = avisos;
+
+      // ── Munição de venda, já calculada ──────────────────────────────────
+      // O agente não faz conta: ele recebe o gancho pronto. Enquanto o
+      // pedido não fecha, este é o argumento mais forte que existe pra
+      // aumentar o valor sem empurrar item que o cliente não quer.
+      if (itens.length && !avaliacao.completo) {
+        const parcial = calcularTotais({
+          itens,
+          tipoEntrega: rascunho.tipo_entrega || 'delivery',
+          cupom: ofertaAtiva || null,
+        });
+        resumo.subtotal_ate_agora = fmtBRL(parcial.subtotal);
+        if (parcial.freteGratis) {
+          resumo.FRETE_GRATIS_CONQUISTADO =
+            `O pedido já passou de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)} — a entrega saiu de graça. Diga isso pro cliente, é um ganho que ele acabou de ter.`;
+        } else if (parcial.faltaParaFreteGratis > 0) {
+          resumo.FALTA_PARA_FRETE_GRATIS = fmtBRL(parcial.faltaParaFreteGratis);
+          resumo.gancho_frete_gratis =
+            `Faltam ${fmtBRL(parcial.faltaParaFreteGratis)} pro frete sair de graça (pedidos acima de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)}). Ofereça UM item específico do cardápio que feche essa diferença — não uma lista, um item só, com o preço colado.`;
+        }
+      }
 
       if (naoEncontrados.length) {
         resumo.ATENCAO_itens_nao_encontrados = naoEncontrados;

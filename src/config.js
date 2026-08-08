@@ -11,6 +11,16 @@
 // (o painel lê de lá) e o agente confere os dois no boot — ver conferirTaxa().
 const TAXA_ENTREGA = Number(process.env.TAXA_ENTREGA || 11);
 
+// Frete grátis a partir deste subtotal. É a alavanca de conversão mais forte
+// que existe aqui: transforma "quanto custa a entrega?" em "faltam R$ 8 pra
+// entrega sair de graça". Regra de negócio, então mora no código e é aplicada
+// no cálculo — a LLM só é informada do resultado, nunca decide.
+//
+// Aplica sobre o SUBTOTAL (antes de desconto de cupom): é o número que o
+// cliente enxerga como "meu pedido", e explicar qualquer outra coisa no
+// WhatsApp gera discussão.
+const FRETE_GRATIS_ACIMA_DE = Number(process.env.FRETE_GRATIS_ACIMA_DE || 40);
+
 // ─── MODELO (OpenAI) ──────────────────────────────────────────────────────────
 // gpt-5.6-terra: o ponto de equilíbrio da família 5.6 — qualidade próxima do
 // topo (Sol) por uma fração do custo e bem mais rápido, que é o que um
@@ -60,8 +70,29 @@ function hojeLocal() {
   }).format(new Date());
 }
 
+// ─── PRAZO DA OFERTA ──────────────────────────────────────────────────────────
+// "Vale até domingo" só funciona como urgência se for verdade e se a data for
+// calculada de fato. Dizer "até domingo" num domingo à noite queima a
+// credibilidade e o cliente aprende a ignorar o prazo.
+const DIAS_SEMANA = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+
+function diaDaSemanaLocal() {
+  // en-US + weekday numérico via Intl para respeitar o fuso do restaurante.
+  const nome = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(new Date());
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(nome);
+}
+
+// Texto do prazo pronto pro agente usar. Domingo é o corte da semana.
+function prazoOfertaTexto() {
+  const hoje = diaDaSemanaLocal();
+  if (hoje === 0) return 'só até hoje (domingo)';
+  if (hoje === 6) return 'até amanhã (domingo)';
+  const faltam = 7 - hoje; // dias até o próximo domingo
+  return faltam <= 2 ? 'até domingo (falta pouco)' : 'até domingo';
+}
+
 module.exports = {
-  TAXA_ENTREGA,
+  TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, diaDaSemanaLocal,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO,
   fmtBRL, money, hojeLocal, TZ,

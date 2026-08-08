@@ -521,11 +521,31 @@ async function processarMensagem(msg, requestId) {
 // Usa claim atômico (UPDATE...RETURNING) em supabase.js — não é "SELECT depois
 // agir", então não tem corrida com uma mensagem nova chegando no meio.
 
-const SILENCIO_FOLLOWUP_MS = 7 * 60_000;
+// Follow-up adaptativo pela temperatura do lead:
+//   - Já escolheu item e está a um passo de fechar → 3 min. É o momento de
+//     maior intenção da conversa inteira; 7 minutos de silêncio aqui é tempo
+//     de sobra pra pessoa pedir em outro lugar.
+//   - Ainda só olhando cardápio → 8 min, pra não parecer insistente com quem
+//     nem decidiu se vai pedir.
+const SILENCIO_QUENTE_MS = 3 * 60_000;
+const SILENCIO_FRIO_MS   = 8 * 60_000;
 const TRAVADO_WATCHDOG_MS = 2 * 60_000;
 
+// Etapas em que o cliente já demonstrou intenção real de compra.
+const ETAPAS_QUENTES = new Set(['coletando_dados', 'aguardando_confirmacao']);
+
 async function pollarFollowups() {
-  const candidatos = await reivindicarFollowups(SILENCIO_FOLLOWUP_MS);
+  // Reivindica pela janela mais larga e filtra aqui: o banco não sabe a regra
+  // de temperatura, e uma query só evita duas rodadas de claim concorrentes.
+  const candidatos = (await reivindicarFollowups(SILENCIO_QUENTE_MS)).filter(r => {
+    const silencioMs = Date.now() - new Date(r.ultima_msg_em).getTime();
+    const limite = ETAPAS_QUENTES.has(r.etapa_atual) ? SILENCIO_QUENTE_MS : SILENCIO_FRIO_MS;
+    if (silencioMs >= limite) return true;
+    // Ainda não é hora: devolve pra fila pra ser pego no ciclo certo.
+    salvarRascunho(r.telefone, { followup_enviado: false }).catch(() => {});
+    return false;
+  });
+
   for (const rascunho of candidatos) {
     const requestId = uuid().slice(0, 8);
     const { telefone } = rascunho;

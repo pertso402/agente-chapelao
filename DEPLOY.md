@@ -44,6 +44,7 @@ EVOLUTION_KEY=sua-key
 EVOLUTION_INSTANCE=chapelao
 
 TAXA_ENTREGA=11
+FRETE_GRATIS_ACIMA_DE=40
 PAUSA_ATENDENTE_MIN=10
 TZ_RESTAURANTE=America/Sao_Paulo
 
@@ -73,7 +74,7 @@ Qualquer `false` em `vars` = variável faltando.
 
 ---
 
-## Mudar a taxa de entrega
+## Mudar a taxa de entrega ou o piso do frete grátis
 
 Só existe **um** lugar: a variável `TAXA_ENTREGA` (ou o valor padrão em
 `src/config.js`). Ela alimenta ao mesmo tempo o resumo que o cliente lê, o
