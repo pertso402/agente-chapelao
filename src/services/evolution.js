@@ -144,6 +144,21 @@ async function enviarTexto(telefone, texto) {
   marcarIdEnviado(data?.key?.id);
 }
 
+// Envia mídia por URL pública (vídeo do buffet do dia, subido pelo painel).
+// A Evolution baixa a URL do lado dela — não precisamos carregar o arquivo
+// aqui, o que evita segurar dezenas de MB na memória do container.
+async function enviarMidia(telefone, url, { tipo = 'video', legenda = '' } = {}) {
+  marcarEnvioIminente(telefone); // mesmo tratamento de eco do enviarTexto
+  const { data } = await cliente().post(`/message/sendMedia/${INSTANCE()}`, {
+    number: telefone,
+    mediatype: tipo,      // 'video' | 'image'
+    media: url,
+    caption: legenda,
+    delay: 400,
+  }, { timeout: 60000 }); // vídeo de buffet é pesado; 15s do padrão não basta
+  marcarIdEnviado(data?.key?.id);
+}
+
 async function enviarDigitando(telefone, duracaoMs = 4000) {
   try {
     await cliente().post(`/message/sendPresence/${INSTANCE()}`, {
@@ -168,5 +183,6 @@ function manterDigitando(telefone) {
 }
 
 module.exports = {
-  extrairMensagem, downloadMidia, enviarTexto, enviarDigitando, manterDigitando, ehEcoDoBot,
+  extrairMensagem, downloadMidia, enviarTexto, enviarMidia,
+  enviarDigitando, manterDigitando, ehEcoDoBot,
 };

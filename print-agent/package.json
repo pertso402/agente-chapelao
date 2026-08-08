@@ -1,0 +1,18 @@
+{
+  "name": "chapelao-print-agent",
+  "version": "1.0.0",
+  "description": "Impressão automática de pedidos na impressora térmica do Restaurante Chapelão",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "teste": "node teste-impressora.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.0",
+    "node-thermal-printer": "^4.4.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
