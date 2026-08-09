@@ -66,11 +66,53 @@ Eventos: messages.upsert
 
 ```
 GET https://SEU-DOMINIO/health
-→ { "status": "ok", "modelo": "gpt-5.6-terra",
-    "vars": { "supa": true, "openai": true, "evolution": true } }
 ```
 
-Qualquer `false` em `vars` = variável faltando.
+```json
+{
+  "status": "ok",
+  "agente": "Chapelão v3",
+  "modelo": { "configurado": "gpt-5.6-terra", "em_uso": "gpt-5.6-terra",
+              "usando_effort": true, "param_tokens": "max_completion_tokens" },
+  "atendimento": { "horario": "de segunda a sábado, das 11h às 14h",
+                   "aberto_agora": true, "hora_local": "12:30" },
+  "vars": { "supa": true, "openai": true, "evolution": true }
+}
+```
+
+| Campo | O que olhar |
+|---|---|
+| `agente` | Tem que ser `Chapelão v3`. Se vier `v2`, o deploy não pegou. |
+| `modelo.em_uso` | Se estiver diferente de `configurado`, a conta OpenAI não tem acesso ao modelo novo e o fallback entrou. Funciona igual, mas vale corrigir. |
+| `atendimento.aberto_agora` | Reflete o botão do painel. |
+| `vars` | Qualquer `false` = variável faltando. |
+
+---
+
+## O botão "Aberta / Fechada" do painel
+
+É a **chave mestra** do atendimento automático. O agente lê esse valor a cada
+mensagem recebida:
+
+| Botão | O que o cliente recebe no WhatsApp |
+|---|---|
+| 🟢 **Aberta** | Atendimento normal — mesmo fora das 11h–14h |
+| 🔴 **Fechada** | Mensagem educada com o horário, sem montar pedido |
+
+O horário age sobre o **botão**, não sobre a conversa:
+
+- **11h**, de segunda a sábado → liga o botão sozinho
+- **depois das 14h** → desliga o botão sozinho
+
+Cada uma dessas ações acontece **no máximo uma vez por dia**. É isso que faz a
+automação ser útil em vez de atrapalhar:
+
+- Fechou ao meio-dia porque acabou a comida? **Não reabre sozinho.**
+- Abriu às 9h para testar? **Não fecha na sua cara** — só depois das 14h.
+
+Para testar o atendimento fora do horário, é só clicar em **Aberta** no painel.
+Não precisa mexer em variável nem publicar nada. E se esquecer ligado, o
+sistema desliga depois das 14h.
 
 ---
 
