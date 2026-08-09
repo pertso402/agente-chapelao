@@ -1,7 +1,7 @@
 'use strict';
 
 const db = require('../services/supabase');
-const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularTotais } = require('../utils/pedido');
+const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularTotais, normalizar } = require('../utils/pedido');
 const { TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
@@ -17,14 +17,27 @@ function prioridadeCategoria(cat) {
 // abaixo — assim nome, descrição e schema ficam legíveis sem o aninhamento.
 const DEFINICOES = [
   {
-    name: 'buscar_cardapio',
-    description: 'Retorna todos os produtos disponíveis com preços REAIS. Use SEMPRE antes de citar qualquer produto, preço ou quando o cliente quiser pedir. Nunca invente itens.',
+    name: 'buscar_itens_do_dia',
+    description: 'O QUE VAI NA MARMITA HOJE: as carnes e os acompanhamentos do dia, com os preços dos tamanhos. É ISTO que o cliente quer quando pede "cardápio", "o que tem hoje" ou diz que quer fazer um pedido. Use esta tool nesses casos — não a buscar_cardapio.',
     parameters: { type: 'object', properties: {}, required: [] },
   },
   {
-    name: 'buscar_itens_do_dia',
-    description: 'Retorna as carnes, base e acompanhamentos disponíveis HOJE na marmitex — a mesma configuração que a cozinha usa no ERP (Porcionamento → Itens do dia). Use sempre que falar de marmitex.',
-    parameters: { type: 'object', properties: {}, required: [] },
+    name: 'buscar_cardapio',
+    description: 'Lista COMPLETA da loja (bebidas, sorvetes, doces — mais de 100 itens). Use SOMENTE quando o cliente perguntar por algo que não é marmita: uma bebida, sobremesa ou item específico ("tem Coca 2L?", "quais refrigerantes?", "tem sorvete?"). NUNCA use para responder "cardápio" ou "quero fazer um pedido" — para isso use buscar_itens_do_dia.',
+    parameters: {
+      type: 'object',
+      properties: {
+        categoria: {
+          type: 'string',
+          description: 'Filtra por uma categoria: Bebidas, Sorvetes, Doces, Refeições, Outros. Use SEMPRE que souber do que o cliente está falando — mandar a lista inteira afoga o cliente e derruba a conversão.',
+        },
+        busca: {
+          type: 'string',
+          description: 'Procura por nome (ex: "coca", "guaraná", "açaí"). Use quando o cliente citar um item específico.',
+        },
+      },
+      required: [],
+    },
   },
   {
     name: 'info_restaurante',
@@ -105,8 +118,41 @@ async function executarTool(nome, args, contexto = {}) {
   switch (nome) {
 
     case 'buscar_cardapio': {
-      const produtos = await db.buscarProdutos();
+      let produtos = await db.buscarProdutos();
       if (!produtos.length) return 'Cardápio indisponível no momento.';
+
+      // Filtros: mandar 100+ itens no WhatsApp afoga o cliente e mata a
+      // conversa. A marmita do dia tem tool própria (buscar_itens_do_dia);
+      // aqui é só pra bebida/sobremesa, e quase sempre com filtro.
+      if (args.busca) {
+        const alvo = normalizar(args.busca);
+        produtos = produtos.filter(p => normalizar(p.nome).includes(alvo));
+        if (!produtos.length) {
+          return `Nenhum produto encontrado com "${args.busca}". Pergunte ao cliente o nome de outro jeito, ou ofereça uma categoria (Bebidas, Sorvetes, Doces).`;
+        }
+      }
+      if (args.categoria) {
+        const alvo = normalizar(args.categoria);
+        const filtrados = produtos.filter(p => normalizar(p.categoria || '') === alvo);
+        if (filtrados.length) produtos = filtrados;
+      }
+
+      // Sem filtro nenhum e com o catálogo inteiro na mão: não despeja. Devolve
+      // o mapa das categorias pra o agente perguntar o que a pessoa quer.
+      if (!args.busca && !args.categoria && produtos.length > 25) {
+        const porCat = {};
+        for (const p of produtos) {
+          const c = (p.categoria || 'Outros').trim();
+          porCat[c] = (porCat[c] || 0) + 1;
+        }
+        const lista = Object.entries(porCat)
+          .sort((a, b) => prioridadeCategoria(a[0]) - prioridadeCategoria(b[0]))
+          .map(([c, n]) => `${c} (${n} itens)`).join(', ');
+        return `A loja tem ${produtos.length} itens além da marmita: ${lista}.\n\n` +
+          `NÃO liste isso tudo pro cliente. Se ele quer a marmita do dia, use buscar_itens_do_dia. ` +
+          `Se quer bebida ou sobremesa, chame esta tool de novo com o parâmetro "categoria" ou "busca" — ` +
+          `ou pergunte a ele com duas opções concretas ("Coca ou Guaraná?").`;
+      }
 
       const cats = {};
       for (const p of produtos) {
@@ -139,16 +185,41 @@ async function executarTool(nome, args, contexto = {}) {
     }
 
     case 'buscar_itens_do_dia': {
-      const itens = await db.buscarItensDoDia();
-      if (!itens) return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia e ofereça o restante do cardápio (buscar_cardapio).';
+      // Esta é a resposta de "cardápio". Quem pergunta o cardápio de uma
+      // marmitaria quer saber o que vai NA MARMITA hoje — não os 112 itens da
+      // loja. Por isso as carnes, os acompanhamentos e os PREÇOS dos tamanhos
+      // vêm juntos numa mensagem só: o cliente decide sem precisar perguntar
+      // "e quanto custa?".
+      const [itens, produtos] = await Promise.all([
+        db.buscarItensDoDia(),
+        db.buscarProdutos(),
+      ]);
 
-      let txt = '🌶️ *Marmitex de Hoje*\n\n';
-      if (itens.carne.length) txt += `🥩 *Carnes (escolha até 2):* ${itens.carne.join(', ')}\n`;
-      const acompanhamentosTodos = [...itens.base, ...itens.acompanhamento];
-      if (acompanhamentosTodos.length) txt += `🍚 *Acompanhamentos (escolha até 6):* ${acompanhamentosTodos.join(', ')}\n`;
-      if (txt === '🌶️ *Marmitex de Hoje*\n\n') return 'Hoje ainda não há itens configurados na marmitex. Avise que a equipe está atualizando o cardápio do dia.';
+      const marmitas = produtos
+        .filter(p => (p.categoria || '').trim().toLowerCase() === 'marmitex')
+        .sort((a, b) => db.precoFinal(a) - db.precoFinal(b));
 
-      return txt.trim();
+      const linhasPreco = marmitas.length
+        ? '\n💰 *Tamanhos:*\n' + marmitas.map(p => `🍱 ${p.nome.trim()} — ${fmtBRL(db.precoFinal(p))}`).join('\n')
+        : '';
+
+      if (!itens) {
+        return 'Hoje ainda não há itens marcados no cardápio do dia. Avise o cliente com naturalidade que a equipe está finalizando o cardápio de hoje e chame chamar_atendente para alguém confirmar o que tem.'
+          + (linhasPreco ? `\n\n(Os preços continuam valendo: ${marmitas.map(p => `${p.nome.trim()} ${fmtBRL(db.precoFinal(p))}`).join(', ')})` : '');
+      }
+
+      const acompanhamentos = [...itens.base, ...itens.acompanhamento];
+      if (!itens.carne.length && !acompanhamentos.length) {
+        return 'Hoje ainda não há itens marcados no cardápio do dia. Avise o cliente e chame chamar_atendente.';
+      }
+
+      let txt = '🍲 *Marmita de hoje*\n\n';
+      if (itens.carne.length) txt += `🥩 *Carnes* (escolha até 2):\n${itens.carne.join(' · ')}\n\n`;
+      if (acompanhamentos.length) txt += `🍚 *Acompanhamentos* (escolha até 6):\n${acompanhamentos.join(' · ')}\n`;
+      txt += linhasPreco;
+
+      return txt.trim() +
+        '\n\n[INSTRUÇÃO INTERNA — não repita esta linha pro cliente: repasse a mensagem acima como ela está e termine com UMA pergunta de escolha, tipo "Prefere a Média ou a Grande?". Não liste o resto da loja.]';
     }
 
     case 'info_restaurante': {
@@ -157,6 +228,9 @@ async function executarTool(nome, args, contexto = {}) {
         nome: info.nome || 'Restaurante Chapelão',
         endereco: info.endereco || '',
         chave_pix: info.chave_pix || '',
+        pix_titular: info.pix_titular || '',
+        pix_banco: info.pix_banco || '',
+        observacao_pix: 'Ao mandar a chave, diga também o nome do titular e o banco. Cliente que não reconhece o nome na tela do banco desiste de pagar.',
         horario: info.horario || 'Seg a Sáb, 11h às 14h',
         loja_aberta: String(info.loja_aberta) !== 'false',
         // Taxa vem de src/config.js — valor fixo e único do sistema. O campo

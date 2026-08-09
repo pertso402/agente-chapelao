@@ -22,7 +22,7 @@ const { normalizar } = require('./utils/pedido');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
   dentroDoHorario, quandoAbreTexto, horaLocal, hojeLocal, TEXTO_HORARIO,
-  ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, diaDaSemanaLocal,
+  ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, diaDaSemanaLocal, decidirLoja,
 } = require('./config');
 
 const app = express();
@@ -721,18 +721,30 @@ async function pollar() {
     pollando = false;
   }
 }
-setInterval(pollar, 60_000);
-
 // ─── START ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  logger.info('servidor/start', `🎩 Agente Chapelão rodando na porta ${PORT}`, {
-    port: PORT,
-    modelo:    modeloEmUso(),
-    horario:   TEXTO_HORARIO,
-    aberto_agora: dentroDoHorario(),
-    supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
-    openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO (agente, visão e áudio)',
-    evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
+// Só sobe servidor e timer quando o arquivo é EXECUTADO. Quando ele é apenas
+// importado (pelos testes), nada dispara — é isso que permite um teste chamar
+// as rotinas do poller de verdade.
+//
+// Esse teste existe por um motivo concreto: `sincronizarLoja` rodou um dia
+// inteiro em produção falhando com "decidirLoja is not defined" — a função
+// estava exportada no config mas faltava no require daqui. `node --check` só
+// valida sintaxe e não pega referência indefinida; só executar pega.
+if (require.main === module) {
+  setInterval(pollar, 60_000);
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    logger.info('servidor/start', `🎩 Agente Chapelão rodando na porta ${PORT}`, {
+      port: PORT,
+      modelo:    modeloEmUso(),
+      horario:   TEXTO_HORARIO,
+      aberto_agora: dentroDoHorario(),
+      supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
+      openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO (agente, visão e áudio)',
+      evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
+    });
   });
-});
+}
+
+module.exports = { app, pollar, sincronizarLoja, pollarFollowups, pollarTravados };
