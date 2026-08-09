@@ -32,10 +32,23 @@ const FRETE_GRATIS_ACIMA_DE = Number(process.env.FRETE_GRATIS_ACIMA_DE || 40);
 const MODEL_AGENTE = process.env.OPENAI_MODEL || 'gpt-5.6-terra';
 const MODEL_VISAO  = process.env.OPENAI_MODEL_VISAO || 'gpt-5.6-terra';
 
-// Profundidade de raciocínio. 'low' mantém a resposta rápida no WhatsApp —
-// e o trabalho pesado de exatidão (preço, total, taxa) não depende mais do
-// modelo: é código. Suba para 'medium' se notar erro de interpretação.
-const EFFORT_AGENTE = process.env.OPENAI_EFFORT || 'low';
+// Profundidade de raciocínio do agente.
+//
+// 'none' NÃO é uma escolha de economia: no /v1/chat/completions o gpt-5.6-terra
+// recusa function tools junto com raciocínio —
+//   "Function tools with reasoning_effort are not supported ... set
+//    reasoning_effort to 'none'"
+// e o agente vive de tools. Omitir o parâmetro não resolve: sem ele o modelo
+// usa o raciocínio padrão e recusa as tools do mesmo jeito. Tem que ser 'none'
+// explícito.
+//
+// Isso custa pouco aqui porque a parte que exige exatidão — preço, taxa, total,
+// troco — é código determinístico, não raciocínio do modelo. E ainda deixa a
+// resposta mais rápida no WhatsApp.
+const EFFORT_AGENTE = process.env.OPENAI_EFFORT || 'none';
+
+// O follow-up não usa tools, então pode raciocinar à vontade.
+const EFFORT_FOLLOWUP = process.env.OPENAI_EFFORT_FOLLOWUP || 'low';
 
 const MAX_TOKENS_AGENTE = Number(process.env.OPENAI_MAX_TOKENS || 3000);
 

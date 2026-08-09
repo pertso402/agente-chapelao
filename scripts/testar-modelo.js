@@ -85,7 +85,8 @@ function clienteFalso(erros = []) {
     const p = _testes.montarPayload([]);
     assert.ok('max_completion_tokens' in p, 'faltou max_completion_tokens');
     assert.ok(!('max_tokens' in p), 'não pode mandar max_tokens para modelo 5.x');
-    assert.ok('reasoning_effort' in p, 'faltou reasoning_effort');
+    assert.strictEqual(p.reasoning_effort, 'none',
+      'o agente usa tools, e no chat/completions isso exige effort none');
   });
 
   teste('modelo antigo usa max_tokens e NÃO manda reasoning_effort', () => {
@@ -143,6 +144,34 @@ function clienteFalso(erros = []) {
     assert.strictEqual(segunda.model, 'gpt-4o', 'não caiu para o modelo reserva');
     assert.ok('max_tokens' in segunda, 'reserva antigo precisa de max_tokens');
     assert.ok(!('reasoning_effort' in segunda), 'reserva antigo não aceita reasoning_effort');
+  });
+
+  await testeAsync('BUG 2: tools + effort → manda "none" EXPLÍCITO, não remove o parâmetro', async () => {
+    // Erro real de produção. Remover o reasoning_effort não resolve: sem ele o
+    // modelo usa o raciocínio padrão e recusa as tools de novo. Tem que ser
+    // 'none' explícito, como a própria mensagem de erro instrui.
+    _testes.resetar('gpt-5.6-terra', 'low');   // alguem configurou OPENAI_EFFORT=low
+    const cli = clienteFalso([
+      erro400("Function tools with reasoning_effort are not supported for gpt-5.6-terra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'."),
+    ]);
+    await _testes.chamarModelo(cli, []);
+
+    assert.strictEqual(cli.chamadas.length, 2, 'deveria tentar de novo uma vez');
+    const segunda = cli.chamadas[1];
+    assert.strictEqual(segunda.reasoning_effort, 'none',
+      'REGRESSÃO: tem que mandar reasoning_effort="none", não omitir');
+    assert.ok('max_completion_tokens' in segunda, 'não pode mexer no parâmetro de tokens');
+    assert.ok('tools' in segunda, 'as tools continuam no payload');
+  });
+
+  await testeAsync('se recusar até com "none", aí sim remove o parâmetro', async () => {
+    _testes.resetar('gpt-5.6-terra', 'low');
+    const erro = "Function tools with reasoning_effort are not supported for gpt-5.6-terra.";
+    const cli = clienteFalso([erro400(erro), erro400(erro)]);
+    await _testes.chamarModelo(cli, []);
+
+    assert.strictEqual(cli.chamadas[1].reasoning_effort, 'none');
+    assert.ok(!('reasoning_effort' in cli.chamadas[2]), 'na terceira já sai sem o parâmetro');
   });
 
   await testeAsync('erro que não é de parâmetro sobe (não vira laço infinito)', async () => {

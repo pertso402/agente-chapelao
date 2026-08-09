@@ -6,7 +6,7 @@ const { salvarRascunho, limparRascunho, criarPedidoCompleto, tentarIniciarConfir
 const { avaliarRascunho, descreverFaltando, parseItens, rotuloPagamento } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
 const {
-  MODEL_AGENTE, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
+  MODEL_AGENTE, EFFORT_AGENTE, EFFORT_FOLLOWUP, MAX_TOKENS_AGENTE,
   TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, TEXTO_HORARIO, fmtBRL,
 } = require('./config');
 const logger = require('./logger');
@@ -217,10 +217,15 @@ let modeloAtivo = MODEL_AGENTE;
 // produção: um 400 em `reasoning_effort` fazia o código trocar
 // `max_completion_tokens` por `max_tokens`, e aí o GPT-5.6 recusava a chamada
 // seguinte ("'max_tokens' is not supported with this model").
-//   - efeitoEffort:  manda ou não `reasoning_effort`
-//   - tokensLegado:  usa `max_tokens` (modelo antigo) em vez de
-//                    `max_completion_tokens` (família 5.x / o-series)
-let usaEffort = true;
+//   - efeitoAtual / effortDesligado: VALOR do reasoning_effort, e se ele vai
+//     ou não no payload. São coisas diferentes: no gpt-5.6-terra, mandar
+//     `reasoning_effort: 'none'` FUNCIONA com tools, mas OMITIR o parâmetro
+//     não — sem ele o modelo usa o raciocínio padrão e recusa as tools do
+//     mesmo jeito. Foi por isso que o segundo erro em produção insistiu.
+//   - tokensLegado: usa `max_tokens` (modelo antigo) em vez de
+//     `max_completion_tokens` (família 5.x / o-series)
+let efeitoAtual = EFFORT_AGENTE;
+let effortDesligado = false;
 let tokensLegado = !usaApiNova(MODEL_AGENTE);
 
 // A família 5.x e os modelos "o" usam max_completion_tokens e aceitam
@@ -255,6 +260,18 @@ function erroDeTokens(err) {
   return null;
 }
 
+// O caso específico do gpt-5.6-terra no /v1/chat/completions:
+//   "Function tools with reasoning_effort are not supported ... set
+//    reasoning_effort to 'none'"
+// A saída é mandar 'none' EXPLÍCITO — omitir não resolve, porque o padrão do
+// modelo é raciocinar e aí ele recusa as tools de novo.
+function erroDeToolsComEffort(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return err?.status === 400
+    && msg.includes('reasoning_effort')
+    && /function tools|tools are not supported|tools with reasoning/.test(msg);
+}
+
 function montarPayload(messages) {
   const payload = {
     model: modeloAtivo,
@@ -267,18 +284,37 @@ function montarPayload(messages) {
   };
   if (tokensLegado) payload.max_tokens = MAX_TOKENS_AGENTE;
   else payload.max_completion_tokens = MAX_TOKENS_AGENTE;
-  if (usaEffort && !tokensLegado) payload.reasoning_effort = EFFORT_AGENTE;
+  if (!effortDesligado && !tokensLegado) payload.reasoning_effort = efeitoAtual;
   return payload;
 }
 
-// Tenta, corrige o que a API reclamar e tenta de novo. No máximo 3 correções,
+// Tenta, corrige o que a API reclamar e tenta de novo. Limite de tentativas
 // pra nunca virar laço infinito em cima de um erro que não é de parâmetro.
 async function chamarModelo(client, messages) {
-  for (let tentativa = 0; tentativa < 4; tentativa++) {
+  for (let tentativa = 0; tentativa < 5; tentativa++) {
     try {
       return await client.chat.completions.create(montarPayload(messages));
     } catch (err) {
       const tipoTokens = erroDeTokens(err);
+
+      // Precisa vir ANTES do tratamento genérico de effort: aqui a correção é
+      // mandar 'none', não parar de mandar o parâmetro.
+      if (erroDeToolsComEffort(err)) {
+        if (efeitoAtual !== 'none') {
+          logger.error('agente/tools-com-effort',
+            `"${modeloAtivo}" não aceita tools com reasoning_effort="${efeitoAtual}" — mudando para 'none'.`,
+            { erro: err.message });
+          efeitoAtual = 'none';
+          continue;
+        }
+        if (!effortDesligado) {
+          logger.error('agente/tools-com-effort',
+            `"${modeloAtivo}" recusou tools até com reasoning_effort='none' — removendo o parâmetro.`,
+            { erro: err.message });
+          effortDesligado = true;
+          continue;
+        }
+      }
 
       if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
         logger.error('agente/modelo-indisponivel',
@@ -286,7 +322,8 @@ async function chamarModelo(client, messages) {
           { erro: err.message });
         modeloAtivo = MODELO_RESERVA;
         tokensLegado = !usaApiNova(MODELO_RESERVA);
-        usaEffort = usaApiNova(MODELO_RESERVA);
+        effortDesligado = !usaApiNova(MODELO_RESERVA);
+        efeitoAtual = EFFORT_AGENTE;
         continue;
       }
 
@@ -298,15 +335,15 @@ async function chamarModelo(client, messages) {
       if (tipoTokens === 'legado' && !tokensLegado) {
         logger.error('agente/tokens-param', `"${modeloAtivo}" exige max_tokens — corrigindo.`, { erro: err.message });
         tokensLegado = true;
-        usaEffort = false; // quem usa max_tokens não conhece reasoning_effort
+        effortDesligado = true; // quem usa max_tokens não conhece reasoning_effort
         continue;
       }
 
-      if (erroDeEffort(err) && usaEffort) {
+      if (erroDeEffort(err) && !effortDesligado) {
         logger.error('agente/effort-recusado',
-          `"${modeloAtivo}" recusou reasoning_effort="${EFFORT_AGENTE}" — repetindo sem ele.`,
+          `"${modeloAtivo}" recusou reasoning_effort="${efeitoAtual}" — repetindo sem ele.`,
           { erro: err.message });
-        usaEffort = false;
+        effortDesligado = true;
         continue;
       }
 
@@ -322,7 +359,7 @@ async function chamarModeloSimples(client, maxTokens, messages) {
     const p = { model: modeloAtivo, messages };
     if (tokensLegado) p.max_tokens = maxTokens;
     else p.max_completion_tokens = maxTokens;
-    if (usaEffort && !tokensLegado) p.reasoning_effort = 'low';
+    if (!effortDesligado && !tokensLegado) p.reasoning_effort = EFFORT_FOLLOWUP;
     return p;
   };
 
@@ -335,12 +372,13 @@ async function chamarModeloSimples(client, maxTokens, messages) {
       if (erroDeModeloIndisponivel(err) && modeloAtivo !== MODELO_RESERVA) {
         modeloAtivo = MODELO_RESERVA;
         tokensLegado = !usaApiNova(MODELO_RESERVA);
-        usaEffort = usaApiNova(MODELO_RESERVA);
+        effortDesligado = !usaApiNova(MODELO_RESERVA);
+        efeitoAtual = EFFORT_AGENTE;
         continue;
       }
       if (tipoTokens === 'novo' && tokensLegado) { tokensLegado = false; continue; }
-      if (tipoTokens === 'legado' && !tokensLegado) { tokensLegado = true; usaEffort = false; continue; }
-      if (erroDeEffort(err) && usaEffort) { usaEffort = false; continue; }
+      if (tipoTokens === 'legado' && !tokensLegado) { tokensLegado = true; effortDesligado = true; continue; }
+      if (erroDeEffort(err) && !effortDesligado) { effortDesligado = true; continue; }
       throw err;
     }
   }
@@ -349,7 +387,11 @@ async function chamarModeloSimples(client, maxTokens, messages) {
 
 // Exposto no /health pra dar pra ver, de fora, se o fallback entrou em ação.
 function modeloEmUso() {
-  return { configurado: MODEL_AGENTE, em_uso: modeloAtivo, usando_effort: usaEffort, param_tokens: tokensLegado ? 'max_tokens' : 'max_completion_tokens' };
+  return {
+    configurado: MODEL_AGENTE, em_uso: modeloAtivo,
+    reasoning_effort: effortDesligado ? '(nao enviado)' : efeitoAtual,
+    param_tokens: tokensLegado ? 'max_tokens' : 'max_completion_tokens',
+  };
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -372,7 +414,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL_AGENTE,
-    effort: EFFORT_AGENTE,
+    effort: effortDesligado ? null : efeitoAtual,
     historico_msgs: anteriores.length,
     etapa: rascunho?.etapa_atual || 'inicio',
   });
@@ -547,10 +589,13 @@ module.exports = {
   // erro aqui que derrubou o atendimento em produção.
   _testes: {
     chamarModelo, montarPayload,
-    resetar(modelo) {
+    // `efeito` permite simular quem configurou OPENAI_EFFORT diferente do
+    // padrão — é assim que se reproduz o erro de tools+effort de produção.
+    resetar(modelo, efeito) {
       modeloAtivo = modelo || MODEL_AGENTE;
       tokensLegado = !usaApiNova(modeloAtivo);
-      usaEffort = usaApiNova(modeloAtivo);
+      efeitoAtual = efeito || EFFORT_AGENTE;
+      effortDesligado = !usaApiNova(modeloAtivo);
     },
   },
 };
