@@ -135,6 +135,35 @@ async function downloadMidia(mensagemRaw) {
   return data;
 }
 
+// Qual instância este container está REALMENTE usando pra enviar, e de qual
+// número ela fala. Existe por um problema concreto: o webhook de uma instância
+// nova apontava pro agente, mas o agente ainda respondia pela instância antiga
+// (variável de ambiente não atualizada), então o cliente mandava mensagem pra
+// um número e recebia resposta de outro. Sem isso, a única forma de descobrir
+// era mandar mensagem e olhar de onde vinha a resposta.
+async function estadoInstancia() {
+  const nome = process.env.EVOLUTION_INSTANCE || null;
+  const base = { url: process.env.EVOLUTION_URL || null, instancia: nome };
+
+  try {
+    const { data } = await cliente().get('/instance/fetchInstances');
+    const lista = Array.isArray(data) ? data : [];
+    const eu = lista.find(i => (i.name || i.instanceName) === nome);
+    if (!eu) {
+      return { ...base, ok: false, erro: `A instância "${nome}" não existe nesta Evolution. Encontradas: ${lista.map(i => i.name || i.instanceName).join(', ') || '(nenhuma)'}` };
+    }
+    return {
+      ...base,
+      ok: eu.connectionStatus === 'open',
+      conexao: eu.connectionStatus,
+      numero: String(eu.ownerJid || '').split('@')[0] || null,
+      perfil: eu.profileName || null,
+    };
+  } catch (err) {
+    return { ...base, ok: false, erro: err.response?.status ? `HTTP ${err.response.status}` : err.message };
+  }
+}
+
 // ─── ENVIO DE MENSAGENS ───────────────────────────────────────────────────────
 
 async function enviarTexto(telefone, texto) {
@@ -186,6 +215,6 @@ function manterDigitando(telefone) {
 }
 
 module.exports = {
-  extrairMensagem, downloadMidia, enviarTexto, enviarMidia,
+  extrairMensagem, downloadMidia, enviarTexto, enviarMidia, estadoInstancia,
   enviarDigitando, manterDigitando, ehEcoDoBot,
 };

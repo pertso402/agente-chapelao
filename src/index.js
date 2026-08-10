@@ -5,7 +5,9 @@ require('dotenv').config();
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const logger = require('./logger');
-const { extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot } = require('./services/evolution');
+const {
+  extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot, estadoInstancia,
+} = require('./services/evolution');
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
@@ -176,8 +178,16 @@ function ehConfirmacao(texto) {
 }
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
+app.get('/health', async (_req, res) => {
+  // De qual WhatsApp este container fala. Trocar a instância é meia mudança:
+  // apontar o webhook da Evolution nova pro agente faz a mensagem CHEGAR, mas
+  // a resposta continua saindo pela instância das variáveis de ambiente. Sem
+  // este campo, o sintoma (cliente escreve pra um número e recebe resposta de
+  // outro) só aparece testando no WhatsApp.
+  const whatsapp = await estadoInstancia().catch(err => ({ ok: false, erro: err.message }));
+
   res.json({
+    whatsapp,
     status: 'ok',
     ts: new Date().toISOString(),
     agente: 'Chapelão v3',
