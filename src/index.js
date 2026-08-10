@@ -12,7 +12,7 @@ const {
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho, atualizarRascunho,
   precificarPedido, buscarTaxasEstouradas, buscarTaxaPadrao,
   definirTaxaEntrega, reivindicarAvisosDeTaxa,
-  buscarInfo, atualizarStatusPedido, buscarPedidoPendente, buscarVideoBuffet,
+  buscarInfo, buscarVideoBuffet, criarPedidoCompleto, tentarIniciarPagamento,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
@@ -386,29 +386,82 @@ async function processarMensagem(msg, requestId) {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
       const pararDigitando = manterDigitando(telefone);
       try {
-        // Confere o VALOR antes de liberar. Um comprovante legítimo de R$ 20
-        // num pedido de R$ 68 é um pagamento parcial — ou o print de outra
-        // compra. Liberar isso pra cozinha é prejuízo direto.
-        const pendente = await buscarPedidoPendente(telefone);
-        const diferenca = comprovanteValor == null ? null : Math.round((comprovanteValor - pendente.total) * 100) / 100;
+        // Confere o VALOR antes de criar o pedido. Um comprovante legítimo de
+        // R$ 20 num pedido de R$ 68 é um pagamento parcial — ou o print de
+        // outra compra. Mandar isso pra cozinha é prejuízo direto.
+        //
+        // A comparação é contra o total FECHADO no SIM (total_confirmado), não
+        // contra uma reprecificação: o cliente pagou o número que leu.
+        const esperado = Number(rascunho.total_confirmado);
+        const diferenca = (comprovanteValor == null || !Number.isFinite(esperado))
+          ? null
+          : Math.round((comprovanteValor - esperado) * 100) / 100;
 
         if (diferenca === null || Math.abs(diferenca) > 0.01) {
-          logger.warn('pix/valor-divergente', 'Valor do comprovante não bate com o pedido', {
-            requestId, telefone, valor_comprovante: comprovanteValor, total_pedido: pendente.total, diferenca,
+          logger.warn('pix/valor-divergente', 'Valor do comprovante não bate com o total combinado', {
+            requestId, telefone, valor_comprovante: comprovanteValor, total_combinado: esperado, diferenca,
           });
           await escalarParaAtendente(
             telefone,
-            `💸 [PIX DIVERGENTE] Pedido #${pendente.numero_pedido}: total ${fmt(pendente.total)}, comprovante ${comprovanteValor == null ? 'sem valor legível' : fmt(comprovanteValor)}${diferenca != null ? ` (diferença ${fmt(diferenca)})` : ''}. Conferir antes de liberar.`,
+            `💸 [PIX DIVERGENTE] ${rascunho.nome_cliente || 'Cliente'}: combinado ${fmt(esperado)}, comprovante ${comprovanteValor == null ? 'sem valor legível' : fmt(comprovanteValor)}${diferenca != null ? ` (diferença ${fmt(diferenca)})` : ''}. O pedido NÃO foi criado — conferir com o cliente antes de liberar.`,
             requestId,
-            { mensagemCliente: `Recebi seu comprovante! 📎 Só que o valor não bateu certinho com o total do pedido *#${pendente.numero_pedido}* (${fmt(pendente.total)}), então vou pedir pra alguém da equipe conferir antes de mandar pra cozinha. Já já te falo! 🙏` },
+            { mensagemCliente: `Recebi seu comprovante! 📎 Só que o valor não bateu certinho com o total do pedido (${fmt(esperado)}), então vou pedir pra alguém da equipe conferir antes de mandar pra cozinha. Já já te falo! 🙏` },
           );
           return;
         }
 
-        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'preparando'),
-          { tentativas: 3, requestId, etapa: 'statusPreparo' });
+        // Pagamento confere: AGORA o pedido é criado e vai pro painel e pra
+        // impressora. A trava é atômica porque cliente que manda o print duas
+        // vezes (ou um retry do WhatsApp) criaria dois pedidos iguais.
+        const travado = await tentarIniciarPagamento(telefone);
+        if (!travado) {
+          logger.info('pix/comprovante-duplicado', 'Outro comprovante da mesma conversa já está sendo processado', { requestId, telefone });
+          return;
+        }
+
+        let r;
+        try {
+          r = await comRetry(
+            () => criarPedidoCompleto({
+              nomeCliente:    travado.nome_cliente,
+              telefone,
+              tipoEntrega:    travado.tipo_entrega,
+              endereco:       travado.endereco,
+              formaPagamento: 'pix',
+              trocoPara:      null,
+              taxaEntrega:    travado.taxa_entrega,
+              itens:          travado.itens,
+              itensBrinde:    travado.itens_brinde,
+              cupom:          ofertaAtiva || null,
+            }),
+            { tentativas: 3, requestId, etapa: 'criarPedidoAposPix' }
+          );
+        } catch (err) {
+          // Devolve pro estado de espera: o cliente já pagou, então não pode
+          // ficar preso em 'processando' sem ninguém olhar.
+          await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix' }).catch(() => {});
+          throw err;
+        }
+
         await limparRascunho(telefone);
-        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
+        logger.info('pedido/criado', 'Pedido criado após comprovante PIX conferido', {
+          requestId, telefone, numero_pedido: r.numeroPedido, total: r.total,
+        });
+
+        // O pedido é reprecificado a partir do catálogo na hora de gravar. Se
+        // algum preço mudou entre o SIM e o comprovante, o valor gravado sai
+        // diferente do que o cliente pagou. O pedido continua válido (ele pagou
+        // o que combinamos), mas alguém precisa saber da diferença.
+        if (Math.abs(Number(r.total) - esperado) > 0.01) {
+          logger.error('pix/total-mudou-apos-pagamento',
+            'Total gravado diferente do total pago pelo cliente', {
+              requestId, telefone, numero_pedido: r.numeroPedido, pago: esperado, gravado: r.total });
+          await criarAlertaAtendimento(telefone, travado.nome_cliente,
+            `⚠️ Pedido #${r.numeroPedido}: cliente pagou ${fmt(esperado)} mas o pedido foi gravado com ${fmt(r.total)} (preço mudou no cardápio no meio da conversa). Conferir.`
+          ).catch(() => {});
+        }
+
+        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${r.numeroPedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
         await responder(telefone, txt, { requestId, etapa: 'enviarPixOk' });
         return;
       } catch (err) {
@@ -477,11 +530,15 @@ async function processarMensagem(msg, requestId) {
           `💰 *Total: ${fmt(r.total)}*\n` + linhaTroco + '\n';
 
         if (r.formaPagamento === 'pix') {
+          // Sem número de pedido aqui: no PIX o pedido só é criado depois do
+          // comprovante conferido. Anunciar "#42 registrado" e depois a pessoa
+          // não pagar deixaria um número que nunca existiu na conversa dela.
           const info = await buscarInfo();
           const chave = info.chave_pix || 'não cadastrada';
-          txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
-            `📱 *Chave PIX:* \`${chave}\`\n\n` +
-            `Faz o PIX e me manda o comprovante aqui que eu já libero pra cozinha 😊`;
+          const titular = info.pix_titular ? `\n👤 *${info.pix_titular}*${info.pix_banco ? ` — ${info.pix_banco}` : ''}` : '';
+          txt = `🎩 Tudo certo, ${pushName}! Seu pedido está reservado:\n\n` + corpo +
+            `📱 *Chave PIX:* \`${chave}\`${titular}\n\n` +
+            `Faz o PIX e me manda o comprovante aqui — assim que eu conferir, mando pra cozinha 😊`;
         } else {
           const prazo = rascunho.tipo_entrega === 'delivery' ? '~35 minutinhos' : '~20 minutinhos';
           txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +

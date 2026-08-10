@@ -2,7 +2,9 @@
 
 const OpenAI = require('openai');
 const { TOOLS, executarTool } = require('./tools');
-const { salvarRascunho, limparRascunho, criarPedidoCompleto, tentarIniciarConfirmacao } = require('./services/supabase');
+const {
+  salvarRascunho, limparRascunho, criarPedidoCompleto, precificarPedido, tentarIniciarConfirmacao,
+} = require('./services/supabase');
 const { avaliarRascunho, descreverFaltando, parseItens, rotuloPagamento } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
 const {
@@ -80,7 +82,7 @@ Use o prazo informado no contexto desta conversa. Nunca invente prazo, nunca inv
 Uma pergunta por mensagem. Cliente com fome no celular não responde questionário. Se faltam 3 informações, pergunte a mais fácil primeiro e vá levando.
 Nunca peça pro cliente "dar uma olhada no cardápio e me avisar" — isso é entregar a bola. Sugira você, com nome e preço.
 
-⛔ LIMITE ABSOLUTO: você pode oferecer *frete grátis* (regra do sistema) e o *brinde do cupom*, quando o contexto disser que existe. NADA MAIS é de graça. Nunca invente desconto, item de cortesia, combo ou promoção que não esteja escrito neste contexto. Prometer o que o sistema não cumpre é pior que perder a venda: o cliente chega na porta cobrando.
+⛔ LIMITE ABSOLUTO: a ÚNICA coisa que você pode oferecer de graça é o *brinde* que o contexto desta conversa disser que existe. Não existe frete grátis. NADA MAIS é de graça. Nunca invente desconto, item de cortesia, combo ou promoção que não esteja escrito neste contexto. Prometer o que o sistema não cumpre é pior que perder a venda: o cliente chega na porta cobrando.
 
 ## FLUXO DE ATENDIMENTO (conduza ativamente)
 1. Saudação calorosa + pergunte o que a pessoa deseja hoje.
@@ -517,6 +519,56 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
     throw erro;
   }
 
+  // ── PIX: reserva, não cria ────────────────────────────────────────────────
+  // No PIX o pedido NÃO entra no painel nem sai na impressora agora. Ele é
+  // criado só quando o comprovante chega e o valor confere — senão a cozinha
+  // monta marmita de quem disse "sim" e nunca pagou.
+  //
+  // O que é gravado aqui é o total fechado com o cliente: é contra ESTE número
+  // que o comprovante vai ser conferido depois. Reprecificar na hora da
+  // conferência faria um comprovante correto ser recusado se algum preço
+  // mudasse no catálogo no meio da conversa.
+  if (rascunho.forma_pagamento === 'pix') {
+    let p;
+    try {
+      p = await comRetry(
+        () => precificarPedido({
+          itens:       rascunho.itens,
+          itensBrinde: rascunho.itens_brinde,
+          tipoEntrega: rascunho.tipo_entrega,
+          cupom:       ofertaAtiva || null,
+          taxaEntrega: rascunho.taxa_entrega,
+        }),
+        { tentativas: 2, requestId, etapa: 'reservarPix' }
+      );
+    } catch (err) {
+      await salvarRascunho(telefone, { etapa_atual: 'aguardando_confirmacao' });
+      throw err;
+    }
+
+    // O brinde continua no rascunho de propósito (diferente do fluxo antigo):
+    // como o pedido ainda não existe, zerar aqui faria o cliente perder a
+    // cortesia que já foi prometida.
+    await salvarRascunho(telefone, {
+      etapa_atual: 'aguardando_pix',
+      total_confirmado: p.total,
+    });
+
+    logger.info('pedido/reservado-pix', 'Total fechado, aguardando comprovante antes de criar o pedido', {
+      requestId, telefone, total: p.total, taxa_entrega: p.taxaEntrega,
+    });
+
+    return {
+      aguardandoPix:  true,
+      numeroPedido:   null,
+      total: p.total, subtotal: p.subtotal, taxaEntrega: p.taxaEntrega, desconto: p.desconto,
+      trocoPara:      null,
+      cupomAplicado:  ofertaAtiva ? ofertaAtiva.codigo : null,
+      brindes:        (p.brindes || []).map(b => `${b.quantidade || 1}x ${b.nome}`),
+      formaPagamento: 'pix',
+    };
+  }
+
   let resultado;
   try {
     resultado = await comRetry(
@@ -540,15 +592,9 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
     throw err;
   }
 
-  if (resultado.formaPagamento === 'pix') {
-    // Mantém o rascunho aguardando comprovante, mas zera o brinde: o cupom já
-    // foi baixado neste pedido e um itens_brinde sobrando seria dado de novo
-    // caso o cliente emende outro pedido na mesma conversa.
-    await salvarRascunho(telefone, { etapa_atual: 'aguardando_pix', itens_brinde: JSON.stringify([]) });
-  } else {
-    // Pedido fechado — limpa o rascunho para a próxima conversa começar zerada
-    await limparRascunho(telefone);
-  }
+  // Pedido fechado — limpa o rascunho para a próxima conversa começar zerada.
+  // (PIX não chega aqui: retorna acima, ainda sem pedido criado.)
+  await limparRascunho(telefone);
 
   logger.info('pedido/criado', 'Pedido registrado via SIM', {
     requestId, telefone,

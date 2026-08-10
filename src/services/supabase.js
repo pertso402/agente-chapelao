@@ -143,6 +143,22 @@ async function tentarIniciarConfirmacao(telefone) {
   return (data || []).length > 0;
 }
 
+// Mesma trava atômica, do outro lado do PIX: passa de 'aguardando_pix' para
+// 'processando' e devolve o rascunho. No PIX o pedido só é criado quando o
+// comprovante chega, então DUAS imagens quase simultâneas (cliente que manda o
+// print duas vezes, retry do WhatsApp) criariam dois pedidos iguais. Só a
+// primeira ganha a corrida.
+async function tentarIniciarPagamento(telefone) {
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ etapa_atual: 'processando', updated_at: new Date().toISOString() })
+    .eq('telefone', telefone)
+    .eq('etapa_atual', 'aguardando_pix')
+    .select('*');
+  if (error) throw new Error(`Supabase/tentarIniciarPagamento: ${error.message}`);
+  return (data || [])[0] || null;
+}
+
 // ─── POLLER: FOLLOW-UP E WATCHDOG ─────────────────────────────────────────────
 // UPDATE...RETURNING atômico (supabase-js faz isso num único round-trip via
 // PostgREST) — evita a corrida de "SELECT candidatos → depois agir → depois
@@ -880,7 +896,8 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 
 module.exports = {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
+  carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho,
+  tentarIniciarConfirmacao, tentarIniciarPagamento,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo,
   buscarVideoBuffet, precificarPedido,
   solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
