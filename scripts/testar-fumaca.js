@@ -39,6 +39,8 @@ require.cache[caminhoDb] = {
           case 'lerMarcador': return null;          // ainda não agiu hoje
           case 'reivindicarFollowups': return [];
           case 'reivindicarTravados': return [];
+          case 'buscarTaxasEstouradas': return [];
+          case 'reivindicarAvisosDeTaxa': return [];
           default: return null;
         }
       };
@@ -99,6 +101,14 @@ async function teste(nome, fn) {
 
   await teste('pollarTravados roda sem quebrar', async () => {
     await app.pollarTravados();
+  });
+
+  await teste('pollarTaxas roda sem quebrar', async () => {
+    await app.pollarTaxas();
+    assert.ok(chamadas.includes('buscarTaxasEstouradas'),
+      'não checou quem está esperando a taxa há tempo demais');
+    assert.ok(chamadas.includes('reivindicarAvisosDeTaxa'),
+      'não checou quem já tem taxa e ainda não foi avisado');
   });
 
   await teste('o ciclo completo do poller roda sem quebrar', async () => {

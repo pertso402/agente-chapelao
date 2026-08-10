@@ -6,20 +6,20 @@
 // ainda escrevia o resumo à mão — foi exatamente assim que o cliente viu
 // R$ 5,00 no "confira seu pedido" e R$ 10,00 no pedido confirmado.
 
-// Taxa FIXA de entrega. Um único número, num único lugar, não tem como divergir.
-// O EasyPanel define TAXA_ENTREGA=11; o banco também foi atualizado para 11
-// (o painel lê de lá) e o agente confere os dois no boot — ver conferirTaxa().
-const TAXA_ENTREGA = Number(process.env.TAXA_ENTREGA || 11);
-
-// Frete grátis a partir deste subtotal. É a alavanca de conversão mais forte
-// que existe aqui: transforma "quanto custa a entrega?" em "faltam R$ 8 pra
-// entrega sair de graça". Regra de negócio, então mora no código e é aplicada
-// no cálculo — a LLM só é informada do resultado, nunca decide.
+// ─── TAXA DE ENTREGA ──────────────────────────────────────────────────────────
+// A taxa NÃO é fixa: cada endereço custa o que custa, e é calculada na mão numa
+// plataforma externa. Qual plataforma depende da FORMA de pagamento — PIX vai
+// pelo iFood (entregador chega mais rápido), dinheiro/cartão vai por outra.
+// Por isso a forma de pagamento é perguntada ANTES de pedir o cálculo.
 //
-// Aplica sobre o SUBTOTAL (antes de desconto de cupom): é o número que o
-// cliente enxerga como "meu pedido", e explicar qualquer outra coisa no
-// WhatsApp gera discussão.
-const FRETE_GRATIS_ACIMA_DE = Number(process.env.FRETE_GRATIS_ACIMA_DE || 40);
+// Este valor aqui é só a rede de segurança: se ninguém digitar a taxa no painel
+// dentro do tempo limite, o agente assume ele e segue. Deixar o cliente
+// esperando indefinidamente perde a venda; cobrar o padrão, não.
+const TAXA_ENTREGA_PADRAO = Number(process.env.TAXA_ENTREGA_PADRAO || process.env.TAXA_ENTREGA || 11);
+
+// Quanto tempo o agente espera alguém digitar a taxa no painel antes de
+// assumir o valor padrão.
+const TIMEOUT_TAXA_MS = Number(process.env.TIMEOUT_TAXA_MIN || 5) * 60_000;
 
 // ─── MODELO (OpenAI) ──────────────────────────────────────────────────────────
 // gpt-5.6-terra: o ponto de equilíbrio da família 5.6 — qualidade próxima do
@@ -190,7 +190,7 @@ function prazoOfertaTexto() {
 }
 
 module.exports = {
-  TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, prazoOfertaTexto, diaDaSemanaLocal,
+  TAXA_ENTREGA_PADRAO, TIMEOUT_TAXA_MS, prazoOfertaTexto, diaDaSemanaLocal,
   ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, TEXTO_HORARIO,
   dentroDoHorario, quandoAbreTexto, horaLocal, decidirLoja,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,

@@ -3,7 +3,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 const { normalizar, parseItens, avaliarRascunho, calcularSubtotal, calcularTotais } = require('../utils/pedido');
-const { TAXA_ENTREGA, hojeLocal, money } = require('../config');
+const { hojeLocal, money } = require('../config');
 const logger = require('../logger');
 
 const sb = createClient(
@@ -397,6 +397,78 @@ async function buscarVideoBuffet() {
   return { url: data.video_url, tipo: data.tipo === 'image' ? 'image' : 'video' };
 }
 
+// ─── TAXA DE ENTREGA CALCULADA À MÃO ──────────────────────────────────────────
+// A taxa varia por endereço e é calculada numa plataforma externa (iFood pro
+// PIX, outra pro dinheiro/cartão). O agente pede, alguém digita no painel, o
+// agente avisa o cliente. Sem resposta a tempo, entra o valor padrão.
+
+// Marca que o pedido está esperando alguém calcular. Atômico: o UPDATE só
+// pega quem ainda NÃO pediu, então duas mensagens do cliente chegando juntas
+// não criam dois alertas no painel para a mesma pessoa.
+async function solicitarTaxaEntrega(telefone) {
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ taxa_status: 'pendente', taxa_solicitada_em: new Date().toISOString() })
+    .eq('telefone', telefone)
+    .is('taxa_entrega', null)
+    .is('taxa_solicitada_em', null)
+    .select('telefone');
+
+  if (error) throw new Error(`Supabase/solicitarTaxaEntrega: ${error.message}`);
+  return (data || []).length > 0; // true = este chamado foi quem abriu o pedido
+}
+
+// Chamado pelo painel quando alguém digita o valor. Também usado pelo próprio
+// agente quando o tempo estoura (aí com origem 'padrao').
+async function definirTaxaEntrega(telefone, valor, origem = 'definida') {
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ taxa_entrega: money(valor), taxa_status: origem })
+    .eq('telefone', String(telefone).replace(/\D/g, ''))
+    .select('telefone, taxa_entrega');
+
+  if (error) throw new Error(`Supabase/definirTaxaEntrega: ${error.message}`);
+  return (data || [])[0] || null;
+}
+
+// Rascunhos com taxa resolvida mas cliente ainda não avisado. O claim é
+// atômico (marca taxa_avisada_em antes de mandar) pra não avisar duas vezes se
+// dois ciclos do poller se cruzarem.
+async function reivindicarAvisosDeTaxa() {
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .update({ taxa_avisada_em: new Date().toISOString() })
+    .in('taxa_status', ['definida', 'padrao'])
+    .not('taxa_entrega', 'is', null)
+    .is('taxa_avisada_em', null)
+    .select('*');
+
+  if (error) throw new Error(`Supabase/reivindicarAvisosDeTaxa: ${error.message}`);
+  return data || [];
+}
+
+// Quem pediu a taxa e ninguém respondeu dentro do tempo limite.
+async function buscarTaxasEstouradas(timeoutMs) {
+  const limite = new Date(Date.now() - timeoutMs).toISOString();
+  const { data, error } = await sb
+    .from('pedido_rascunho')
+    .select('*')
+    .eq('taxa_status', 'pendente')
+    .is('taxa_entrega', null)
+    .lte('taxa_solicitada_em', limite);
+
+  if (error) throw new Error(`Supabase/buscarTaxasEstouradas: ${error.message}`);
+  return data || [];
+}
+
+// Valor de segurança, ajustável pelo painel sem publicar código.
+async function buscarTaxaPadrao(fallback) {
+  const { data } = await sb
+    .from('info_restaurante').select('valor').eq('chave', 'taxa_entrega_padrao').maybeSingle();
+  const n = Number(String(data?.valor || '').replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 // ─── CHAVE MESTRA: LOJA ABERTA / FECHADA ──────────────────────────────────────
 // O botão "Aberta/Fechada" do painel é quem manda. O agente lê essa chave a
 // cada mensagem, então um clique na cozinha tem efeito imediato — inclusive
@@ -457,13 +529,6 @@ async function buscarInfo() {
   const info = {};
   for (const row of (data || [])) info[row.chave] = row.valor;
   return info;
-}
-
-// Taxa de entrega é FIXA e vem de src/config.js — nunca do banco. Ter duas
-// origens (config + info_restaurante) foi a causa raiz do resumo mostrar um
-// valor e o pedido confirmado outro.
-function getTaxaEntrega() {
-  return TAXA_ENTREGA;
 }
 
 // ─── CLIENTES ─────────────────────────────────────────────────────────────────
@@ -595,7 +660,7 @@ async function darBaixaCupom(cupomId, pedidoId) {
 // Repreça sempre a partir do catálogo FRESCO por produto_id: não confia no
 // preço cacheado no rascunho, que pode ter envelhecido durante a conversa.
 
-async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom }) {
+async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega }) {
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
 
@@ -628,19 +693,21 @@ async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom }) {
     return { ...i, preco_unitario: precoFinal(prod) };
   });
 
-  const totais = calcularTotais({ itens: listaRepreçada, tipoEntrega, cupom });
+  const totais = calcularTotais({ itens: listaRepreçada, tipoEntrega, cupom, taxaEntrega });
   return { itens: listaRepreçada, brindes: listaBrinde, ...totais };
 }
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, itens, cupom, itensBrinde }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, taxaEntrega, itens, cupom, itensBrinde }) {
   const tel = String(telefone).replace(/\D/g, '');
 
+  // `taxaCobrada` (e não taxaEntrega) porque o parâmetro de entrada já usa esse
+  // nome: aqui é o valor que a precificação de fato aplicou.
   const {
     itens: listaRepreçada, brindes: listaBrinde,
-    subtotal, taxaEntrega, desconto, total,
-  } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom });
+    subtotal, taxaEntrega: taxaCobrada, desconto, total,
+  } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega });
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
   // Canal de origem do pedido, pra medir depois de onde vem cada venda.
@@ -665,7 +732,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       forma_pagamento: formaPagamento,
       troco_para: troco,
       subtotal,
-      taxa_entrega: taxaEntrega,
+      taxa_entrega: taxaCobrada,
       desconto,
       cupom_id: cupom ? cupom.id : null,
       total,
@@ -731,7 +798,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
 
   return {
     numeroPedido: pedido.numero_pedido,
-    total, subtotal, taxaEntrega, desconto,
+    total, subtotal, taxaEntrega: taxaCobrada, desconto,
     trocoPara: troco,
     cupomAplicado: cupom ? cupom.codigo : null,
     brindes: listaBrinde.map(b => `${b.quantidade || 1}x ${b.nome}`),
@@ -772,8 +839,10 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho, tentarIniciarConfirmacao,
-  buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo, getTaxaEntrega,
+  buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo,
   buscarVideoBuffet, precificarPedido,
+  solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
+  buscarTaxasEstouradas, buscarTaxaPadrao,
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
   atualizarStatusPedido, buscarPedidoPendente,

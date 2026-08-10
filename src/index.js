@@ -9,7 +9,9 @@ const { extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitand
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
-  carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho,
+  carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho, atualizarRascunho,
+  precificarPedido, buscarTaxasEstouradas, buscarTaxaPadrao,
+  definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarInfo, atualizarStatusPedido, buscarPedidoPendente, buscarVideoBuffet,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
@@ -18,9 +20,10 @@ const {
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso } = require('./agent');
 const { comRetry } = require('./utils/retry');
-const { normalizar } = require('./utils/pedido');
+const { normalizar, montarResumoFinal, descreverFaltando } = require('./utils/pedido');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
+  TAXA_ENTREGA_PADRAO, TIMEOUT_TAXA_MS,
   dentroDoHorario, quandoAbreTexto, horaLocal, hojeLocal, TEXTO_HORARIO,
   ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, diaDaSemanaLocal, decidirLoja,
 } = require('./config');
@@ -706,12 +709,93 @@ async function pollarTravados() {
   }
 }
 
+// ─── TAXA DE ENTREGA: FECHAR O CICLO ──────────────────────────────────────────
+// Duas coisas, nesta ordem:
+//   1. Quem pediu a taxa e ninguém digitou dentro do prazo recebe o valor
+//      padrão. Deixar o cliente esperando indefinidamente perde a venda;
+//      cobrar o padrão, não.
+//   2. Quem já tem taxa (digitada no painel OU padrão) e ainda não foi avisado
+//      recebe a mensagem — PROATIVA, sem o cliente perguntar nada. O claim
+//      dessa lista é atômico, então dois ciclos cruzados não avisam duas vezes.
+async function pollarTaxas() {
+  // 1) Estouro do prazo
+  const estouradas = await buscarTaxasEstouradas(TIMEOUT_TAXA_MS);
+  if (estouradas.length) {
+    const padrao = await buscarTaxaPadrao(TAXA_ENTREGA_PADRAO);
+    for (const r of estouradas) {
+      try {
+        await definirTaxaEntrega(r.telefone, padrao, 'padrao');
+        logger.info('taxa/padrao-aplicada',
+          `Ninguém digitou a taxa em ${TIMEOUT_TAXA_MS / 60000} min — aplicado o valor padrão`,
+          { telefone: r.telefone, taxa: padrao });
+      } catch (err) {
+        logger.error('taxa/padrao-erro', err.message, { telefone: r.telefone, stack: err.stack });
+      }
+    }
+  }
+
+  // 2) Avisar o cliente
+  const paraAvisar = await reivindicarAvisosDeTaxa();
+  for (const r of paraAvisar) {
+    const requestId = uuid().slice(0, 8);
+    const { telefone } = r;
+    try {
+      if (await verificarPausa(telefone)) continue;
+
+      // Recalcula a etapa agora que a taxa existe — é o que pode levar o
+      // rascunho de "coletando_dados" para "aguardando_confirmacao".
+      const { rascunho, avaliacao } = await atualizarRascunho(telefone, {});
+      const taxa = Number(rascunho.taxa_entrega);
+
+      if (!avaliacao.completo) {
+        // Falta outra coisa (nome, por exemplo). Manda só a taxa — o total
+        // ainda não pode ser dito, e dizer total incompleto é o bug original.
+        await responder(telefone,
+          `Confirmei a entrega pro seu endereço: *${fmt(taxa)}* 🚴\n\nSó preciso de mais uma coisinha: ${descreverFaltando(avaliacao.faltando)}.`,
+          { requestId, etapa: 'taxa-parcial' });
+        continue;
+      }
+
+      const cupom = await buscarCupomAtivoPorTelefone(telefone).catch(() => null);
+      const totais = await precificarPedido({
+        itens:       rascunho.itens,
+        itensBrinde: rascunho.itens_brinde,
+        tipoEntrega: rascunho.tipo_entrega,
+        cupom:       cupom || null,
+        taxaEntrega: rascunho.taxa_entrega,
+      });
+
+      const resumo = montarResumoFinal({
+        itens:          totais.itens,
+        brindes:        totais.brindes,
+        tipoEntrega:    rascunho.tipo_entrega,
+        endereco:       rascunho.endereco,
+        formaPagamento: rascunho.forma_pagamento,
+        trocoPara:      rascunho.troco_para,
+        totais,
+        cupomCodigo:    cupom?.codigo,
+      });
+
+      await responder(telefone,
+        `Confirmei a entrega pro seu endereço: *${fmt(taxa)}* 🚴\n\n${resumo}`,
+        { requestId, etapa: 'taxa-definida' });
+
+      logger.info('taxa/cliente-avisado', 'Taxa calculada e resumo enviado', {
+        requestId, telefone, taxa, origem: rascunho.taxa_status,
+      });
+    } catch (err) {
+      logger.error('taxa/aviso-erro', err.message, { requestId, telefone, stack: err.stack });
+    }
+  }
+}
+
 let pollando = false;
 async function pollar() {
   if (pollando) return;
   pollando = true;
   try {
     await sincronizarLoja();
+    await pollarTaxas();
     await pollarFollowups();
     await pollarTravados();
     logger.info('poller/heartbeat', 'Ciclo do poller concluído', {});
@@ -747,4 +831,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, pollar, sincronizarLoja, pollarFollowups, pollarTravados };
+module.exports = { app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas };

@@ -1,8 +1,8 @@
 'use strict';
 
 const db = require('../services/supabase');
-const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularTotais, normalizar } = require('../utils/pedido');
-const { TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
+const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularSubtotal, normalizar } = require('../utils/pedido');
+const { PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = { 'marmitex': 0, 'combos': 1, 'combo': 1, 'maioneses': 8, 'bebidas': 9 };
@@ -233,11 +233,10 @@ async function executarTool(nome, args, contexto = {}) {
         observacao_pix: 'Ao mandar a chave, diga também o nome do titular e o banco. Cliente que não reconhece o nome na tela do banco desiste de pagar.',
         horario: info.horario || 'Seg a Sáb, 11h às 14h',
         loja_aberta: String(info.loja_aberta) !== 'false',
-        // Taxa vem de src/config.js — valor fixo e único do sistema. O campo
-        // taxa_entrega do banco é ignorado de propósito.
-        taxa_entrega_reais: TAXA_ENTREGA,
-        frete_gratis_acima_de_reais: FRETE_GRATIS_ACIMA_DE,
-        observacao_frete: `A entrega custa ${fmtBRL(TAXA_ENTREGA)} para qualquer endereço, MAS é GRÁTIS em pedidos acima de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)}. Nunca cite a taxa sozinha: cite sempre junto com o frete grátis, porque é isso que faz o cliente aumentar o pedido em vez de desistir.`,
+        // Não existe taxa fixa nem frete grátis. Cada endereço é calculado à
+        // mão pela equipe, e o valor só existe depois que a forma de pagamento
+        // for conhecida (PIX sai por uma plataforma, dinheiro/cartão por outra).
+        observacao_frete: 'NUNCA diga um valor de entrega por conta própria. A taxa varia por endereço e é calculada pela equipe. Peça o endereço e a forma de pagamento; o sistema cuida do resto e te entrega o valor pronto.',
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
       });
     }
@@ -292,23 +291,35 @@ async function executarTool(nome, args, contexto = {}) {
       if (avisos?.length) resumo.AVISOS = avisos;
 
       // ── Munição de venda, já calculada ──────────────────────────────────
-      // O agente não faz conta: ele recebe o gancho pronto. Enquanto o
-      // pedido não fecha, este é o argumento mais forte que existe pra
-      // aumentar o valor sem empurrar item que o cliente não quer.
+      // O agente não faz conta: ele recebe o número pronto. O subtotal aqui é
+      // SEM taxa de propósito — a taxa ainda não existe nesta altura, e citar
+      // um total incompleto foi o bug que originou todo este sistema.
       if (itens.length && !avaliacao.completo) {
-        const parcial = calcularTotais({
-          itens,
-          tipoEntrega: rascunho.tipo_entrega || 'delivery',
-          cupom: ofertaAtiva || null,
-        });
-        resumo.subtotal_ate_agora = fmtBRL(parcial.subtotal);
-        if (parcial.freteGratis) {
-          resumo.FRETE_GRATIS_CONQUISTADO =
-            `O pedido já passou de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)} — a entrega saiu de graça. Diga isso pro cliente, é um ganho que ele acabou de ter.`;
-        } else if (parcial.faltaParaFreteGratis > 0) {
-          resumo.FALTA_PARA_FRETE_GRATIS = fmtBRL(parcial.faltaParaFreteGratis);
-          resumo.gancho_frete_gratis =
-            `Faltam ${fmtBRL(parcial.faltaParaFreteGratis)} pro frete sair de graça (pedidos acima de ${fmtBRL(FRETE_GRATIS_ACIMA_DE)}). Ofereça UM item específico do cardápio que feche essa diferença — não uma lista, um item só, com o preço colado.`;
+        resumo.subtotal_ate_agora_sem_taxa = fmtBRL(calcularSubtotal(itens));
+      }
+
+      // ── Taxa de entrega: pedir o cálculo à equipe ───────────────────────
+      // Dispara assim que dá: delivery + endereço + forma de pagamento. A
+      // forma de pagamento é pré-requisito porque decide a plataforma em que
+      // a corrida é pedida (PIX → iFood, dinheiro/cartão → outra), e isso
+      // muda o preço. Pedir antes disso seria calcular a taxa errada.
+      if (rascunho.tipo_entrega === 'delivery' && rascunho.taxa_entrega == null) {
+        const faltaPraPedir = [];
+        if (!rascunho.endereco)        faltaPraPedir.push('endereço completo');
+        if (!rascunho.forma_pagamento) faltaPraPedir.push('forma de pagamento');
+
+        if (faltaPraPedir.length) {
+          resumo.TAXA_ENTREGA = `Ainda não dá pra calcular a entrega: falta ${faltaPraPedir.join(' e ')}. Peça isso agora, numa pergunta só. Não invente valor de entrega.`;
+        } else {
+          const abriu = await db.solicitarTaxaEntrega(telefone).catch(() => false);
+          if (abriu) {
+            await db.criarAlertaAtendimento(
+              telefone,
+              rascunho.nome_cliente,
+              `TAXA DE ENTREGA: calcular para ${rascunho.endereco} (pagamento: ${rascunho.forma_pagamento}) e digitar o valor no painel.`
+            ).catch(() => {});
+          }
+          resumo.TAXA_ENTREGA = 'A equipe já está calculando a taxa para este endereço. Avise o cliente que você está confirmando o valor da entrega e que já volta com o total fechado — em pouquinho tempo. NÃO chute valor, NÃO mande resumo, NÃO peça confirmação ainda. O sistema manda a mensagem com o total assim que a taxa sair.';
         }
       }
 
@@ -327,6 +338,7 @@ async function executarTool(nome, args, contexto = {}) {
           itensBrinde: rascunho.itens_brinde,
           tipoEntrega: rascunho.tipo_entrega,
           cupom: ofertaAtiva || null,
+          taxaEntrega: rascunho.taxa_entrega,
         });
 
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';

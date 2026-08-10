@@ -5,7 +5,7 @@
 // do pedido E para calcular/renderizar o dinheiro. O CÓDIGO (não a LLM) é a
 // fonte da verdade sobre o que falta e sobre quanto custa.
 
-const { TAXA_ENTREGA, FRETE_GRATIS_ACIMA_DE, fmtBRL, money } = require('../config');
+const { fmtBRL, money } = require('../config');
 
 function normalizar(s) {
   return String(s || '')
@@ -39,6 +39,11 @@ function avaliarRascunho(r = {}) {
   // saber quanto levar e a conta acontece na porta do cliente. Zero é uma
   // resposta válida ("tenho o valor certo") — por isso o teste é != null.
   if (r.forma_pagamento === 'dinheiro' && r.troco_para == null) faltando.push('troco');
+  // Delivery sem taxa calculada não fecha: o total sairia errado. A taxa é
+  // calculada à mão no painel, então este é o único item da lista que NÃO
+  // depende do cliente responder nada — depende da equipe digitar o valor
+  // (ou dos 5 minutos de espera estourarem e o padrão entrar).
+  if (r.tipo_entrega === 'delivery' && r.taxa_entrega == null) faltando.push('taxa_entrega');
 
   const completo = faltando.length === 0;
 
@@ -56,6 +61,7 @@ const LABEL_FALTANDO = {
   tipo_entrega:    'se é entrega (delivery) ou retirada',
   endereco:        'o endereço de entrega',
   forma_pagamento: 'a forma de pagamento (pix, dinheiro ou cartão)',
+  taxa_entrega:    'o valor da taxa de entrega (está sendo calculado pela equipe)',
   troco:           'se precisa de troco e pra quanto (pagamento em dinheiro)',
 };
 
@@ -74,22 +80,18 @@ function calcularSubtotal(itens) {
 // Chamada tanto na hora de MOSTRAR o resumo quanto na hora de CRIAR o pedido.
 // Enquanto as duas telas passarem por aqui, é impossível divergirem.
 
-function calcularTotais({ itens, tipoEntrega, cupom }) {
+// `taxaEntrega` vem de FORA: é o valor calculado à mão para aquele endereço,
+// guardado no rascunho. Não existe mais taxa fixa nem frete grátis por valor —
+// cada endereço custa o que custa.
+//
+// null/undefined em delivery significa "ainda não calculada", e isso deixa o
+// pedido incompleto de propósito (ver avaliarRascunho): sem a taxa não dá pra
+// mostrar total, e mostrar total errado foi o bug que originou tudo isto.
+function calcularTotais({ itens, tipoEntrega, cupom, taxaEntrega }) {
   const subtotal = calcularSubtotal(itens);
 
-  // Frete grátis acima do limite. É regra de negócio fixa: aplicada aqui, no
-  // mesmo cálculo que gera o resumo e o pedido, então não tem como o cliente
-  // ver "grátis" na tela e ser cobrado depois.
   const ehDelivery = tipoEntrega === 'delivery';
-  const freteGratis = ehDelivery && subtotal >= FRETE_GRATIS_ACIMA_DE;
-  const taxaEntrega = (ehDelivery && !freteGratis) ? money(TAXA_ENTREGA) : 0;
-
-  // Quanto falta pro frete sair de graça. É o número que transforma
-  // "quanto é a entrega?" em "faltam R$ 8 e a entrega sai de graça" — o
-  // agente recebe isso pronto e nunca calcula por conta própria.
-  const faltaParaFreteGratis = (ehDelivery && !freteGratis)
-    ? money(FRETE_GRATIS_ACIMA_DE - subtotal)
-    : 0;
+  const taxa = ehDelivery ? money(taxaEntrega || 0) : 0;
 
   // Cupom de brinde não abate percentual — o benefício são os itens grátis.
   const ehBrinde = cupom?.tipo === 'brinde';
@@ -97,8 +99,8 @@ function calcularTotais({ itens, tipoEntrega, cupom }) {
     ? money(subtotal * (Number(cupom.desconto_percentual) / 100))
     : 0;
 
-  const total = money(subtotal + taxaEntrega - desconto);
-  return { subtotal, taxaEntrega, desconto, total, freteGratis, faltaParaFreteGratis };
+  const total = money(subtotal + taxa - desconto);
+  return { subtotal, taxaEntrega: taxa, desconto, total };
 }
 
 // ─── RESUMO FINAL (texto pronto pro WhatsApp) ─────────────────────────────────
@@ -139,10 +141,9 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   linhas.push(`💳 Pagamento: ${rotuloPagamento(formaPagamento)}`);
   linhas.push('');
   linhas.push(`🛍️ Subtotal: ${fmtBRL(totais.subtotal)}`);
-  // Frete grátis aparece como linha própria, e não some da conta: o cliente
-  // precisa VER o benefício que ganhou, senão ele não existe pra ele.
-  if (totais.freteGratis) linhas.push('🚴 Entrega: *GRÁTIS* 🎉');
-  else if (totais.taxaEntrega > 0) linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
+  // Em delivery a linha da taxa aparece SEMPRE, mesmo que seja zero: o cliente
+  // precisa ver que a entrega foi contabilizada, senão ele desconfia do total.
+  if (tipoEntrega === 'delivery') linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
   if (totais.desconto > 0)    linhas.push(`🏷️ Desconto${cupomCodigo ? ` (${cupomCodigo})` : ''}: -${fmtBRL(totais.desconto)}`);
   linhas.push(`💰 *Total: ${fmtBRL(totais.total)}*`);
 
