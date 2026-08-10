@@ -187,9 +187,18 @@ Se ele pedir pra agendar para outro dia ou fora do horário, chame chamar_atende
       ? `\n- Os ÚNICOS itens que podem sair como cortesia são: ${permitidos.map(p => `*${p}*`).join(' e ')}. Use esses nomes EXATOS em itens_brinde. O sistema recusa qualquer outro item, então oferecer coisa diferente cria uma promessa que não vai ser cumprida.`
       : '';
 
-    partes.push(`## 🎁 BRINDE DE PRIMEIRA COMPRA ATIVO PRA ESTE CLIENTE
-Este cliente recebeu uma oferta com o cupom *${ofertaAtiva.codigo}*, válido até ${ofertaAtiva.valido_ate}.
+    // Brinde de anúncio e brinde de primeira compra usam a mesma mecânica, mas
+    // a origem muda o que faz sentido dizer: "você veio pelo anúncio" é
+    // reconhecível pro cliente; "primeira compra" seria estranho pra quem já
+    // comprou antes e voltou por um anúncio.
+    const deAnuncio = String(ofertaAtiva.codigo || '').startsWith('ANUNCIO-');
+
+    partes.push(`## 🎁 BRINDE ATIVO PRA ESTE CLIENTE
+${deAnuncio
+  ? 'Este cliente chegou pelo nosso anúncio, e quem vem pelo anúncio ganha uma cortesia.'
+  : `Este cliente recebeu uma oferta com o cupom *${ofertaAtiva.codigo}*, válido até ${ofertaAtiva.valido_ate}.`}
 O que ele ganhou: *${ofertaAtiva.descricao || 'brinde de primeira compra'}*.
+${deAnuncio ? '- Ofereça a cortesia LOGO, antes de falar de preço: é o motivo de ele ter clicado. Só não repita a cada mensagem.\n- Se ele perguntar de qual sabor, diga que ele escolhe — a gente separa na hora de montar.\n' : ''}
 - Esse cupom NÃO é desconto em dinheiro. O benefício são os itens de cortesia acima. NUNCA fale em porcentagem de desconto pra ele.${listaPermitidos}
 - Confirme com ele que quer o brinde e chame salvar_dados_pedido com o campo *itens_brinde*. O sistema zera o preço desses itens sozinho.
 - NUNCA ofereça outro tamanho, outra marca ou outro item como brinde, mesmo que o cliente peça. Se ele quiser algo diferente, explique com gentileza que a cortesia é essa e que o resto ele pode adicionar normalmente.

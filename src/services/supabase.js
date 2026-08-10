@@ -547,6 +547,48 @@ async function garantirCliente(telefone, pushName, adInfo) {
     .from('clientes')
     .upsert(payload, { onConflict: 'telefone', ignoreDuplicates: true });
   if (error) throw new Error(`Supabase/garantirCliente: ${error.message}`);
+
+  if (adInfo) await garantirBrindeDeAnuncio(tel);
+}
+
+// ─── BRINDE DE QUEM VEIO DE ANÚNCIO ───────────────────────────────────────────
+// Quem chega por anúncio tem direito a um refrigerante mini de 200ml, qualquer
+// sabor. No catálogo isso é UM produto só ("Refrigerante 200ml Pet") — o sabor
+// é escolhido na hora de montar, então não existe lista de sabores a validar.
+//
+// Vira um cupom de brinde normal em vez de uma regra à parte: assim ele passa
+// pelas mesmas travas que já existem (o item tem que estar em itens_permitidos,
+// o preço é zerado pelo código, e a baixa é dada no pedido). A LLM continua sem
+// conseguir dar comida de graça por conta própria.
+//
+// O código do cupom carrega o telefone e a coluna é UNIQUE: o insert é
+// idempotente por construção. Cliente que voltar por outro anúncio não ganha
+// um segundo brinde — é bônus de aquisição, uma vez por pessoa.
+const BRINDE_ANUNCIO = 'Refrigerante 200ml Pet';
+const VALIDADE_BRINDE_ANUNCIO_DIAS = 7;
+
+async function garantirBrindeDeAnuncio(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+
+  const { data: cliente } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
+  if (!cliente) return false;
+
+  const validoAte = new Date(Date.now() + VALIDADE_BRINDE_ANUNCIO_DIAS * 86_400_000)
+    .toISOString().slice(0, 10);
+
+  const { error } = await sb.from('cupons').upsert({
+    cliente_id:          cliente.id,
+    codigo:              `ANUNCIO-${tel}`,
+    tipo:                'brinde',
+    descricao:           '1 refrigerante mini de 200ml (qualquer sabor) — cortesia de quem veio pelo anúncio',
+    itens_permitidos:    [BRINDE_ANUNCIO],
+    desconto_percentual: 0,
+    valido_ate:          validoAte,
+    usado:               false,
+  }, { onConflict: 'codigo', ignoreDuplicates: true });
+
+  if (error) throw new Error(`Supabase/garantirBrindeDeAnuncio: ${error.message}`);
+  return true;
 }
 
 // Marca o primeiro sinal real de interesse (carrinho montado) — idempotente,
@@ -844,7 +886,7 @@ module.exports = {
   solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarTaxasEstouradas, buscarTaxaPadrao,
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
-  garantirCliente, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
+  garantirCliente, garantirBrindeDeAnuncio, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
   atualizarStatusPedido, buscarPedidoPendente,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
   verificarPausa, pausarAtendimento, retomarAtendimento, reivindicarFollowups, reivindicarTravados,
