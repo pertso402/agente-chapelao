@@ -13,7 +13,10 @@ function cliente() {
   });
 }
 
-const INSTANCE = () => process.env.EVOLUTION_INSTANCE;
+// O nome da instância entra direto no CAMINHO da URL (/message/sendText/<nome>),
+// então precisa ser escapado: a instância em uso chama-se "Chapela - atendimento"
+// e um espaço cru no path quebra a requisição.
+const INSTANCE = () => encodeURIComponent(process.env.EVOLUTION_INSTANCE || '');
 
 // ─── DETECÇÃO DE ECO DO PRÓPRIO BOT ───────────────────────────────────────────
 // Mensagens fromMe:true chegam tanto quando é o BOT ecoando a própria resposta
