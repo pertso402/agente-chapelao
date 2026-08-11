@@ -120,19 +120,30 @@ function extrairMensagem(body) {
   const contextInfoRaw = message?.[messageType]?.contextInfo || data?.contextInfo || null;
   const adInfo = contextInfoRaw?.externalAdReplyInfo || null;
 
-  return { telefone, pushName, tipo, texto, mensagemRaw: message, base64, mimetype, adInfo, contextInfoRaw };
+  // `key` viaja junto porque é por ela que a mídia é baixada depois
+  // (getBase64FromMediaMessage busca por key.id, não pelo conteúdo).
+  return { telefone, pushName, tipo, texto, key, msgId: key.id || null, mensagemRaw: message, base64, mimetype, adInfo, contextInfoRaw };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────
 
-async function downloadMidia(mensagemRaw) {
+// A rota é /chat/getBase64FromMediaMessage. A antiga (/message/downloadMediaMessage)
+// não existe mais na Evolution v2 e respondia 404 — o que derrubava ÁUDIO e
+// COMPROVANTE PIX pelo mesmo motivo, sem que a causa aparecesse: o cliente só
+// via "não consegui entender seu áudio".
+//
+// A busca é pela CHAVE da mensagem (key.id), não pelo conteúdo dela.
+async function downloadMidia(msg) {
+  const key = msg?.key || msg;
+  if (!key?.id) throw new Error('Mensagem sem key.id — impossível baixar a mídia.');
+
   const { data } = await cliente().post(
-    `/message/downloadMediaMessage/${INSTANCE()}`,
-    { message: mensagemRaw }
+    `/chat/getBase64FromMediaMessage/${INSTANCE()}`,
+    { message: { key }, convertToMp4: false }
   );
-  // Retorna { base64, mimetype }
+
   if (!data?.base64) throw new Error('Evolution não retornou base64 da mídia.');
-  return data;
+  return { base64: data.base64, mimetype: data.mimetype || data.mediaType || null };
 }
 
 // Qual instância este container está REALMENTE usando pra enviar, e de qual

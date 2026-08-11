@@ -219,7 +219,9 @@ async function executarTool(nome, args, contexto = {}) {
       txt += linhasPreco;
 
       return txt.trim() +
-        '\n\n[INSTRUÇÃO INTERNA — não repita esta linha pro cliente: repasse a mensagem acima como ela está e termine com UMA pergunta de escolha, tipo "Prefere a Média ou a Grande?". Não liste o resto da loja.]';
+        '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com UMA pergunta de escolha, tipo "Prefere a Média ou a Grande?". Não liste o resto da loja.' +
+        ' O cliente fala como gente, não como cardápio: "porco" é a carne suína do dia (paleta, pernil, lombo, costelinha), "boi"/"carne" é a bovina (bife, costela, almôndega, patinho), "frango" é a de ave (coxa, sobrecoxa, filé). Faça essa tradução VOCÊ, em silêncio, e confirme de forma natural — "boa, hoje o porco é paleta suína assada ✅".' +
+        ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.]';
     }
 
     case 'info_restaurante': {

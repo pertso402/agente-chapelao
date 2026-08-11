@@ -245,15 +245,79 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  // Junta as mensagens picadas antes de responder (ver agruparMensagem).
+  agruparMensagem(msg, requestId);
+});
+
+// ─── AGRUPAR MENSAGENS PICADAS ────────────────────────────────────────────────
+// No WhatsApp as pessoas escrevem em rajada: "Olá!" · "Só pra salvar o número"
+// · "Blz" — três mensagens em segundos. Respondendo uma por uma, o agente
+// mandava três respostas quase iguais, cada uma perguntando de novo "prefere
+// Pequena, Média ou Grande?". Isso é o que faz o atendimento parecer robô.
+//
+// Agora o texto espera um instante de silêncio e vira UMA rodada só. O relógio
+// REINICIA a cada mensagem nova (a pessoa ainda está digitando), com um teto
+// pra quem escreve sem parar nunca ficar sem resposta.
+//
+// Áudio, imagem e localização NÃO esperam: cada um tem tratamento próprio
+// (transcrever, ler comprovante) e juntar mudaria o significado. Eles descarregam
+// o que estiver acumulado e seguem na frente.
+const ESPERA_AGRUPAR_MS = Number(process.env.AGRUPAR_MSG_SEG || 6) * 1000;
+const TETO_AGRUPAR_MS = ESPERA_AGRUPAR_MS * 4;
+
+const buffers = new Map(); // telefone -> { msgs, timer, requestId, desde }
+
+function ehTextoSimples(msg) {
+  return msg.tipo === 'text' || msg.tipo === 'conversation' || msg.tipo === 'extendedTextMessage';
+}
+
+function despachar(telefone) {
+  const buf = buffers.get(telefone);
+  if (!buf) return;
+  clearTimeout(buf.timer);
+  buffers.delete(telefone);
+
+  // Uma mensagem só: segue idêntico ao que era antes.
+  const base = buf.msgs[buf.msgs.length - 1];
+  const textos = buf.msgs.map(m => (m.texto || '').trim()).filter(Boolean);
+  const juntado = { ...base, texto: textos.join('\n') };
+
+  if (buf.msgs.length > 1) {
+    logger.info('webhook/agrupado', 'Mensagens picadas juntadas numa rodada só', {
+      requestId: buf.requestId, telefone, quantidade: buf.msgs.length,
+    });
+  }
+
   // Serializa por telefone: mensagens do MESMO cliente chegando rápido uma
   // atrás da outra esperam a anterior terminar antes de ler/escrever o
   // rascunho — evita duas escritas concorrentes se atropelarem. Clientes
   // diferentes continuam processando 100% em paralelo.
-  await enfileirar(msg.telefone, () => processarMensagem(msg, requestId));
-});
+  enfileirar(telefone, () => processarMensagem(juntado, buf.requestId));
+}
+
+function agruparMensagem(msg, requestId) {
+  const { telefone } = msg;
+
+  if (!ehTextoSimples(msg)) {
+    despachar(telefone); // manda o texto acumulado antes, na ordem em que veio
+    enfileirar(telefone, () => processarMensagem(msg, requestId));
+    return;
+  }
+
+  const buf = buffers.get(telefone) || { msgs: [], timer: null, requestId, desde: Date.now() };
+  clearTimeout(buf.timer);
+  buf.msgs.push(msg);
+
+  // Teto: quem manda mensagem a cada 3 segundos sem parar não pode adiar a
+  // resposta pra sempre.
+  const restante = Math.max(0, TETO_AGRUPAR_MS - (Date.now() - buf.desde));
+  buf.timer = setTimeout(() => despachar(telefone), Math.min(ESPERA_AGRUPAR_MS, restante));
+
+  buffers.set(telefone, buf);
+}
 
 async function processarMensagem(msg, requestId) {
-  const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
+  const { telefone, pushName, tipo, key, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
   logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: (conteudo || '').slice(0, 60) });
@@ -265,7 +329,7 @@ async function processarMensagem(msg, requestId) {
       try {
         let b64 = base64Inline, mime = mimetypeInline || 'audio/ogg';
         if (!b64) {
-          const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudio' });
+          const m = await comRetry(() => downloadMidia(key), { tentativas: 3, requestId, etapa: 'downloadAudio' });
           b64 = m.base64; mime = m.mimetype || 'audio/ogg';
         }
         const transcricao = await comRetry(() => transcreverAudio(b64, mime), { tentativas: 2, requestId, etapa: 'transcricao' });
@@ -307,7 +371,7 @@ async function processarMensagem(msg, requestId) {
       try {
         let b64 = base64Inline, mime = mimetypeInline || 'image/jpeg';
         if (!b64) {
-          const m = await comRetry(() => downloadMidia(mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagem' });
+          const m = await comRetry(() => downloadMidia(key), { tentativas: 3, requestId, etapa: 'downloadImagem' });
           b64 = m.base64; mime = m.mimetype || 'image/jpeg';
         }
         const r = await comRetry(() => analisarImagem(b64, mime), { tentativas: 2, requestId, etapa: 'visao' });
@@ -898,4 +962,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas };
+module.exports = {
+  app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas,
+  _testes: { agruparMensagem, despachar },
+};
