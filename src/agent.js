@@ -289,7 +289,7 @@ function erroDeToolsComEffort(err) {
     && /function tools|tools are not supported|tools with reasoning/.test(msg);
 }
 
-function montarPayload(messages) {
+function montarPayload(messages, maxTokens = MAX_TOKENS_AGENTE) {
   const payload = {
     model: modeloAtivo,
     messages,
@@ -299,18 +299,18 @@ function montarPayload(messages) {
     // duas tools em paralelo poderiam se atropelar no mesmo estado.
     parallel_tool_calls: false,
   };
-  if (tokensLegado) payload.max_tokens = MAX_TOKENS_AGENTE;
-  else payload.max_completion_tokens = MAX_TOKENS_AGENTE;
+  if (tokensLegado) payload.max_tokens = maxTokens;
+  else payload.max_completion_tokens = maxTokens;
   if (!effortDesligado && !tokensLegado) payload.reasoning_effort = efeitoAtual;
   return payload;
 }
 
 // Tenta, corrige o que a API reclamar e tenta de novo. Limite de tentativas
 // pra nunca virar laço infinito em cima de um erro que não é de parâmetro.
-async function chamarModelo(client, messages) {
+async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE) {
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     try {
-      return await client.chat.completions.create(montarPayload(messages));
+      return await client.chat.completions.create(montarPayload(messages, maxTokens));
     } catch (err) {
       const tipoTokens = erroDeTokens(err);
 
@@ -487,7 +487,26 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     throw err;
   }
 
-  const textoFinal = resposta.choices[0].message?.content?.trim() || '';
+  let textoFinal = resposta.choices[0].message?.content?.trim() || '';
+
+  // Resposta vazia com finish_reason 'length' é o modelo de raciocínio gastando
+  // o orçamento inteiro pensando e sobrando 0 tokens pro texto visível — não é
+  // erro de API (não lança exceção), então nenhum retry automático de cima
+  // pega isso. Uma segunda tentativa com o dobro do budget resolve a maioria
+  // dos casos sem precisar pausar o atendimento e chamar humano por algo que o
+  // próprio modelo resolveria com mais espaço.
+  if (!textoFinal) {
+    logger.warn('agente/vazio-retry', 'Resposta vazia, tentando de novo com mais tokens', {
+      requestId, telefone, finish_reason: resposta.choices[0].finish_reason,
+      tokens_out: resposta.usage?.completion_tokens,
+    });
+    resposta = await comRetry(
+      () => chamarModelo(client, messages, MAX_TOKENS_AGENTE * 2),
+      { tentativas: 2, requestId, etapa: 'openai/retry-vazio' }
+    );
+    textoFinal = resposta.choices[0].message?.content?.trim() || '';
+  }
+
   logger.step(requestId, telefone, 'agente/ok', {
     iteracoes,
     finish_reason: resposta.choices[0].finish_reason,
