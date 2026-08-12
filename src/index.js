@@ -507,6 +507,7 @@ async function processarMensagem(msg, requestId) {
               itens:          travado.itens,
               itensBrinde:    travado.itens_brinde,
               cupom:          ofertaAtiva || null,
+              observacaoGeral: travado.observacao || null,
             }),
             { tentativas: 3, requestId, etapa: 'criarPedidoAposPix' }
           );

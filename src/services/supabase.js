@@ -757,7 +757,7 @@ async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEn
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, taxaEntrega, itens, cupom, itensBrinde }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, taxaEntrega, itens, cupom, itensBrinde, observacaoGeral }) {
   const tel = String(telefone).replace(/\D/g, '');
 
   // `taxaCobrada` (e não taxaEntrega) porque o parâmetro de entrada já usa esse
@@ -794,7 +794,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       desconto,
       cupom_id: cupom ? cupom.id : null,
       total,
-      observacao: null,
+      observacao: observacaoGeral ? String(observacaoGeral).trim() : null,
       canal,
     })
     .select('id, numero_pedido, total')

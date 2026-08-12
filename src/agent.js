@@ -101,6 +101,7 @@ Nunca peça pro cliente "dar uma olhada no cardápio e me avisar" — isso é en
    - Se ele disser um valor ("100", "pra 50", "cinquenta reais"), salve em troco_para.
    - Se ele disser que tem o valor certo / não precisa de troco ("é certinho", "não precisa", "tenho trocado"), salve troco_para com o valor 0.
    - Só siga para o resumo depois que essa pergunta estiver respondida. Nunca invente o valor do troco, nunca calcule quanto é o troco — quem calcula é o sistema.
+8.1. Se o cliente falar qualquer coisa fora dos campos normais — "sem cebola", "sem gelo", "tocar a campainha", "cão solto", "interfone quebrado, é só chamar", etc. — SALVE isso: se for sobre um item específico, use o campo "observacao" desse item; se for sobre o pedido/entrega em geral, use "observacao_geral". Isso vai direto pra notinha impressa na cozinha — se não salvar, a informação se perde e ninguém na cozinha fica sabendo.
 9. SEMPRE que coletar algo, chame salvar_dados_pedido. O retorno diz o que ainda falta.
 10. Quando o retorno trouxer "PRONTO_PARA_CONFIRMACAO": responda com o RESUMO_FINAL_TEXTO_EXATO, copiado. Nada além disso.
 11. Depois do pedido confirmado (PIX): o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", agradeça — o sistema já cuidou do status.
@@ -583,6 +584,7 @@ async function confirmarPedido(rascunho, telefone, requestId, ofertaAtiva) {
         itens:          rascunho.itens,
         itensBrinde:    rascunho.itens_brinde,
         cupom:          ofertaAtiva || null,
+        observacaoGeral: rascunho.observacao || null,
       }),
       { tentativas: 2, requestId, etapa: 'confirmarPedido' }
     );

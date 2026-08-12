@@ -61,10 +61,12 @@ const DEFINICOES = [
               quantidade:      { type: 'number' },
               carnes:          { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: carnes escolhidas (máx 2), nomes exatos de buscar_itens_do_dia.' },
               acompanhamentos: { type: 'array', items: { type: 'string' }, description: 'SÓ pra item de Marmitex: acompanhamentos escolhidos (máx 6), nomes exatos de buscar_itens_do_dia.' },
+              observacao:      { type: 'string', description: 'Pedido específico SÓ deste item (ex: "sem cebola", "sem gelo", "ponto da carne bem passado"). Vai direto pra cozinha na notinha impressa.' },
             },
             required: ['nome', 'quantidade'],
           },
         },
+        observacao_geral: { type: 'string', description: 'Observação do pedido como um todo, não ligada a um item específico (ex: "tocar a campainha", "cão solto no quintal", "levar troco pra R$ 100", "apto 302, interfone quebrado"). Vai direto pra cozinha/entregador na notinha impressa — capture SEMPRE que o cliente falar algo assim.' },
         itens_brinde: {
           type: 'array',
           description: 'SÓ use quando o cliente tiver cupom de BRINDE ativo (informado no contexto). São os itens de cortesia que ele escolheu. Use os NOMES EXATOS do cardápio. O sistema zera o preço automaticamente.',
@@ -253,6 +255,7 @@ async function executarTool(nome, args, contexto = {}) {
       if (args.tipo_entrega)    campos.tipo_entrega    = args.tipo_entrega;
       if (args.endereco)        campos.endereco        = args.endereco;
       if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
+      if (args.observacao_geral) campos.observacao = args.observacao_geral;
       // troco 0 é resposta válida ("tenho o valor certo") — por isso o teste é
       // contra null/undefined, não contra "valor falsy".
       if (args.troco_para != null) campos.troco_para = Math.max(0, Number(args.troco_para) || 0);
@@ -285,6 +288,7 @@ async function executarTool(nome, args, contexto = {}) {
         tipo_entrega: rascunho.tipo_entrega || null,
         endereco: rascunho.endereco || null,
         forma_pagamento: rascunho.forma_pagamento || null,
+        observacao_geral: rascunho.observacao || null,
         troco_para: rascunho.troco_para == null
           ? null
           : (Number(rascunho.troco_para) === 0 ? 'não precisa de troco' : fmtBRL(rascunho.troco_para)),
