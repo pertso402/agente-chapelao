@@ -89,8 +89,11 @@ function extrairMensagem(body) {
   } else if (messageType === 'imageMessage') {
     texto = message.imageMessage?.caption || '';
   } else if (messageType === 'documentMessage') {
+    // Fica com tipo='documentMessage' (não vira 'text') porque comprovante de
+    // PIX às vezes chega como PDF (ex: Nubank), não como foto — e nesse caso
+    // não é um "documento qualquer": index.js precisa saber diferenciar pra
+    // não deixar a LLM tentar adivinhar o que fazer com isso.
     texto = '[Documento recebido]';
-    tipo = 'text';
   } else if (messageType === 'locationMessage' || messageType === 'liveLocationMessage') {
     // Localização (fixa ou em tempo real): converte pra um link de mapa e trata
     // como texto normal — o agente entende isso como o endereço do cliente,

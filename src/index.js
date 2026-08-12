@@ -454,6 +454,23 @@ async function processarMensagem(msg, requestId) {
       cupom_ativo: ofertaAtiva?.codigo || null,
     });
 
+    // ── Comprovante mandado como PDF/arquivo, não como foto ──────────────────
+    // WhatsApp entrega comprovante de alguns bancos (ex: Nubank) como
+    // documentMessage, não imageMessage — e o agente não sabe ler PDF. Sem
+    // este bloco, isso caía direto na LLM, que não tinha o que fazer e ficava
+    // repetindo o resumo do pedido a cada mensagem nova (bug real observado
+    // em produção: 3 repetições seguidas pro mesmo cliente). Determinístico
+    // e sai ANTES do agente, então funciona mesmo com atendimento pausado.
+    if (tipo === 'documentMessage' && rascunho?.etapa_atual === 'aguardando_pix') {
+      logger.info('pix/comprovante-como-documento', 'Cliente mandou comprovante como arquivo/PDF, pedindo foto', { requestId, telefone });
+      await responder(
+        telefone,
+        `Recebi seu arquivo! 📎 Só que aqui eu só consigo conferir comprovante em *foto* — pode me mandar um print de tela ou uma foto do comprovante? 🙏`,
+        { requestId, etapa: 'pix/pedirFoto' }
+      );
+      return;
+    }
+
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
     // Determinístico — continua funcionando mesmo com o atendimento pausado.
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
@@ -669,7 +686,10 @@ async function processarMensagem(msg, requestId) {
       //
       // Quem decide é o CÓDIGO (o agente usou uma tool de cardápio?), não a
       // LLM: assim ela não promete vídeo que não existe nem esquece de mandar.
-      if (mostrouCardapio) {
+      // Só manda UMA VEZ por pedido: cliente que pergunta o cardápio de novo
+      // mais tarde na mesma conversa (pra conferir algo, trocar item) não
+      // precisa ver o vídeo de novo — vira spam.
+      if (mostrouCardapio && !rascunho?.video_buffet_enviado) {
         try {
           const video = await buscarVideoBuffet();
           if (video) {
@@ -677,6 +697,7 @@ async function processarMensagem(msg, requestId) {
               tipo: video.tipo,
               legenda: '🍽️ Esse é o nosso buffet de hoje!',
             });
+            await stamparRascunho(telefone, { video_buffet_enviado: true }).catch(() => {});
             logger.info('buffet/video-enviado', 'Vídeo do buffet enviado', { requestId, telefone, tipo: video.tipo });
           } else {
             logger.info('buffet/sem-video', 'Nenhum vídeo de buffet para hoje', { requestId, telefone });
