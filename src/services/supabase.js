@@ -14,17 +14,25 @@ const sb = createClient(
 
 // ─── HISTÓRICO DE CONVERSA ────────────────────────────────────────────────────
 
+// ATENÇÃO ao ORDER + LIMIT: ordenar crescente e limitar traz as mensagens mais
+// ANTIGAS da conversa, não as últimas. Cliente que já conversou mais de `limite`
+// vezes fazia o agente reler o começo do histórico (de dias atrás) achando que
+// era a conversa de agora — foi assim que ele mandou "confira seu pedido" com
+// itens de ontem pra quem já tinha recebido a marmita. Por isso: busca DESC
+// (as mais recentes) e só depois inverte pra ordem cronológica.
 async function carregarHistorico(telefone, limite = 16) {
   const { data, error } = await sb
     .from('n8n_chat_histories')
-    .select('message')
+    .select('message, created_at')
     .eq('session_id', telefone)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(limite);
 
   if (error) throw new Error(`Supabase/carregarHistorico: ${error.message}`);
 
   return (data || [])
+    .slice()
+    .reverse()
     .map(row => {
       try { return typeof row.message === 'string' ? JSON.parse(row.message) : row.message; }
       catch { return null; }
@@ -43,13 +51,26 @@ async function salvarMensagem(telefone, role, content) {
 // ─── RASCUNHO DO PEDIDO ───────────────────────────────────────────────────────
 // Fonte da verdade do estado do pedido. A etapa é SEMPRE recalculada pelo código.
 
+// Rascunho é do DIA. O cardápio muda todo dia, então um rascunho que sobrou de
+// ontem não é "pedido em andamento": as carnes escolhidas nem estão mais no
+// buffet. Deixar essa linha viva fazia o agente retomar no dia seguinte um
+// pedido que o cliente já tinha recebido ("já estou com sua marmita anotada").
 async function carregarRascunho(telefone) {
   const { data } = await sb
     .from('pedido_rascunho')
     .select('*')
     .eq('telefone', telefone)
     .maybeSingle();
-  return data || null;
+  if (!data) return null;
+
+  if (data.dia && data.dia !== hojeLocal()) {
+    await limparRascunho(telefone).catch(() => {});
+    logger.info('rascunho/expirado', 'Rascunho de outro dia descartado', {
+      telefone, dia_do_rascunho: data.dia, hoje: hojeLocal(), etapa: data.etapa_atual,
+    });
+    return null;
+  }
+  return data;
 }
 
 // Merge parcial de baixo nível: nunca apaga campo que não veio.
@@ -66,7 +87,10 @@ async function salvarRascunho(telefone, campos) {
     const { error } = await sb.from('pedido_rascunho').update(update).eq('telefone', telefone);
     if (error) throw new Error(`Supabase/salvarRascunho(update): ${error.message}`);
   } else {
-    const { error } = await sb.from('pedido_rascunho').insert({ telefone, ...update });
+    // `dia` só é gravado no INSERT: no UPDATE ele tem que continuar apontando
+    // pro dia em que o rascunho nasceu, senão a mensagem de amanhã "rejuvenesce"
+    // o rascunho de hoje e a expiração nunca dispara.
+    const { error } = await sb.from('pedido_rascunho').insert({ telefone, dia: hojeLocal(), ...update });
     if (error) throw new Error(`Supabase/salvarRascunho(insert): ${error.message}`);
   }
 }
@@ -179,6 +203,10 @@ async function reivindicarFollowups(silencioMs) {
     .eq('followup_enviado', false)
     .eq('ultima_msg_role', 'assistant')
     .in('etapa_atual', ETAPAS_PEDIDO_ABERTO)
+    // Só rascunho de HOJE: sem isso, uma conversa encerrada ontem (inclusive a
+    // resposta automática de "estamos fechados") virava follow-up na manhã
+    // seguinte, retomando um pedido que já tinha sido entregue.
+    .eq('dia', hojeLocal())
     .lte('ultima_msg_em', limite)
     .select('*');
   if (error) throw new Error(`Supabase/reivindicarFollowups: ${error.message}`);
