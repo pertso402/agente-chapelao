@@ -96,20 +96,44 @@ function diaDaSemanaLocal() {
 }
 
 // ─── HORÁRIO DE FUNCIONAMENTO ─────────────────────────────────────────────────
-// Segunda a sábado, 11h às 14h. Fora disso o agente não monta pedido: avisa o
-// horário e encerra com educação.
+// Segunda a sábado, 10h30 às 14h. Fora disso o agente não monta pedido: avisa
+// o horário e encerra com educação.
 //
 // Isto é uma trava de CÓDIGO, não uma instrução de prompt. Instrução de prompt
 // a LLM contorna quando o cliente insiste ("mas só hoje, por favor"), e aí a
 // cozinha recebe pedido de madrugada.
-const ABRE_HORA = Number(process.env.ABRE_HORA || 11);
-const FECHA_HORA = Number(process.env.FECHA_HORA || 14);
+// Aceita "10:30" ou "11" — a casa passou a abrir às 10h30, e hora cheia deixou
+// de dar conta. Tudo aqui vira MINUTOS desde a meia-noite, que é a única forma
+// de comparar 10h30 com 10h59 sem gambiarra.
+function parseHorario(valor, padraoMin) {
+  const txt = String(valor ?? '').trim();
+  if (!txt) return padraoMin;
+  const [h, m] = txt.split(':');
+  const hora = Number(h);
+  const minuto = Number(m || 0);
+  if (!Number.isFinite(hora) || !Number.isFinite(minuto)) return padraoMin;
+  return hora * 60 + minuto;
+}
+
+const ABRE_MIN = parseHorario(process.env.ABRE_HORA, 10 * 60 + 30);
+const FECHA_MIN = parseHorario(process.env.FECHA_HORA, 14 * 60);
+
+// Mantidos para quem só precisa da hora cheia (logs, textos curtos).
+const ABRE_HORA = Math.floor(ABRE_MIN / 60);
+const FECHA_HORA = Math.floor(FECHA_MIN / 60);
+
+// "10h30" / "14h" — sem ":00" pendurado quando é hora cheia.
+function horarioTexto(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h}h${String(m).padStart(2, '0')}` : `${h}h`;
+}
 // 0=domingo … 6=sábado. Padrão: segunda a sábado.
 const DIAS_ABERTOS = (process.env.DIAS_ABERTOS || '1,2,3,4,5,6')
   .split(',').map(d => Number(d.trim())).filter(Number.isInteger);
 
 const TEXTO_HORARIO = process.env.TEXTO_HORARIO
-  || `de segunda a sábado, das ${String(ABRE_HORA).padStart(2, '0')}h às ${String(FECHA_HORA).padStart(2, '0')}h`;
+  || `de segunda a sábado, das ${horarioTexto(ABRE_MIN)} às ${horarioTexto(FECHA_MIN)}`;
 
 // Hora e minuto no fuso do restaurante — nunca no fuso do servidor, que roda
 // em UTC e acharia que 11h de Umuarama é 14h.
@@ -126,25 +150,26 @@ function horaLocal() {
 function dentroDoHorario() {
   const dia = diaDaSemanaLocal();
   if (!DIAS_ABERTOS.includes(dia)) return false;
-  const { hora } = horaLocal();
-  return hora >= ABRE_HORA && hora < FECHA_HORA;
+  const { hora, minuto } = horaLocal();
+  const agora = hora * 60 + minuto;
+  return agora >= ABRE_MIN && agora < FECHA_MIN;
 }
 
 // Frase de quando volta a atender, pra mensagem não terminar em beco sem saída.
 function quandoAbreTexto() {
   const dia = diaDaSemanaLocal();
-  const { hora } = horaLocal();
-  const abreHoje = DIAS_ABERTOS.includes(dia) && hora < ABRE_HORA;
-  if (abreHoje) return `hoje às ${ABRE_HORA}h`;
+  const { hora, minuto } = horaLocal();
+  const abreHoje = DIAS_ABERTOS.includes(dia) && (hora * 60 + minuto) < ABRE_MIN;
+  if (abreHoje) return `hoje às ${horarioTexto(ABRE_MIN)}`;
 
   // Procura o próximo dia aberto a partir de amanhã.
   for (let i = 1; i <= 7; i++) {
     const proximo = (dia + i) % 7;
     if (!DIAS_ABERTOS.includes(proximo)) continue;
     const quando = i === 1 ? 'amanhã' : DIAS_SEMANA[proximo];
-    return `${quando} às ${ABRE_HORA}h`;
+    return `${quando} às ${horarioTexto(ABRE_MIN)}`;
   }
-  return `às ${ABRE_HORA}h`;
+  return `às ${horarioTexto(ABRE_MIN)}`;
 }
 
 // ─── DECISÃO DE ABRIR/FECHAR A LOJA ───────────────────────────────────────────
@@ -160,8 +185,13 @@ function quandoAbreTexto() {
 //     manual feito no meio do expediente.
 //
 // Devolve: { acao: 'abrir' | 'fechar' | null, marcador: chave|null }
-function decidirLoja({ hora, diaUtil, hoje, marcadorAbertura, marcadorFechamento, lojaAberta }) {
-  const dentroDaJanela = diaUtil && hora >= ABRE_HORA && hora < FECHA_HORA;
+// `minuto` é opcional: quem só tem a hora cheia continua chamando como antes.
+// Isso passou a importar quando a casa começou a abrir às 10h30 — às 10h a
+// loja ainda está fechada, às 10h30 já está aberta, e a hora cheia sozinha
+// não distingue os dois.
+function decidirLoja({ hora, minuto = 0, diaUtil, hoje, marcadorAbertura, marcadorFechamento, lojaAberta }) {
+  const agora = hora * 60 + minuto;
+  const dentroDaJanela = diaUtil && agora >= ABRE_MIN && agora < FECHA_MIN;
 
   if (dentroDaJanela) {
     if (marcadorAbertura !== hoje) {
@@ -171,8 +201,8 @@ function decidirLoja({ hora, diaUtil, hoje, marcadorAbertura, marcadorFechamento
   }
 
   // Fora da janela: só fecha DEPOIS do expediente (ou em dia não útil).
-  // Antes de ABRE_HORA num dia útil, não faz nada.
-  const depoisDoExpediente = !diaUtil || hora >= FECHA_HORA;
+  // Antes do horário de abrir, num dia útil, não faz nada.
+  const depoisDoExpediente = !diaUtil || agora >= FECHA_MIN;
   if (depoisDoExpediente && marcadorFechamento !== hoje) {
     return { acao: lojaAberta ? 'fechar' : 'so-marcar', marcador: 'loja_auto_fechamento' };
   }
@@ -191,7 +221,7 @@ function prazoOfertaTexto() {
 
 module.exports = {
   TAXA_ENTREGA_PADRAO, TIMEOUT_TAXA_MS, prazoOfertaTexto, diaDaSemanaLocal,
-  ABRE_HORA, FECHA_HORA, DIAS_ABERTOS, TEXTO_HORARIO,
+  ABRE_HORA, FECHA_HORA, ABRE_MIN, FECHA_MIN, horarioTexto, DIAS_ABERTOS, TEXTO_HORARIO,
   dentroDoHorario, quandoAbreTexto, horaLocal, decidirLoja,
   MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, MAX_TOKENS_AGENTE,
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO,

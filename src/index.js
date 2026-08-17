@@ -777,7 +777,7 @@ const ETAPAS_QUENTES = new Set(['coletando_dados', 'aguardando_confirmacao']);
 async function sincronizarLoja() {
   try {
     const hoje = hojeLocal();
-    const { hora } = horaLocal();
+    const { hora, minuto } = horaLocal();
 
     const [marcadorAbertura, marcadorFechamento, lojaAberta] = await Promise.all([
       lerMarcador('loja_auto_abertura'),
@@ -786,7 +786,7 @@ async function sincronizarLoja() {
     ]);
 
     const { acao, marcador } = decidirLoja({
-      hora, hoje, lojaAberta,
+      hora, minuto, hoje, lojaAberta,
       diaUtil: DIAS_ABERTOS.includes(diaDaSemanaLocal()),
       marcadorAbertura, marcadorFechamento,
     });

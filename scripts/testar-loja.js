@@ -10,7 +10,7 @@
 //   npm run test:loja
 
 const assert = require('assert');
-const { decidirLoja, ABRE_HORA, FECHA_HORA } = require('../src/config');
+const { decidirLoja, ABRE_HORA, FECHA_HORA, ABRE_MIN, FECHA_MIN, horarioTexto } = require('../src/config');
 
 let passou = 0;
 function teste(nome, fn) {
@@ -39,8 +39,25 @@ function cenario(extra = {}) {
 
 console.log('\n🎩 Abertura automática\n');
 
-teste(`abre às ${ABRE_HORA}h em dia útil`, () => {
-  assert.strictEqual(cenario({ hora: ABRE_HORA }).acao, 'abrir');
+// A casa passou a abrir às 10h30. Antes o código comparava só a hora cheia,
+// então 10h00 e 10h30 eram indistinguíveis e a loja abria meia hora cedo —
+// com o agente montando pedido antes de a cozinha estar pronta.
+const emHora = (min) => ({ hora: Math.floor(min / 60), minuto: min % 60 });
+
+teste(`abre no minuto exato da abertura (${horarioTexto(ABRE_MIN)}) em dia útil`, () => {
+  assert.strictEqual(cenario(emHora(ABRE_MIN)).acao, 'abrir');
+});
+
+teste('NÃO abre um minuto antes da abertura', () => {
+  assert.strictEqual(cenario(emHora(ABRE_MIN - 1)).acao, null);
+});
+
+teste(`fecha no minuto exato do fechamento (${horarioTexto(FECHA_MIN)})`, () => {
+  assert.strictEqual(cenario({ ...emHora(FECHA_MIN), lojaAberta: true }).acao, 'fechar');
+});
+
+teste('um minuto antes de fechar ainda está aberto', () => {
+  assert.strictEqual(cenario(emHora(FECHA_MIN - 1)).acao, 'abrir');
 });
 
 teste('abre no meio do expediente (container reiniciou às 12h)', () => {
