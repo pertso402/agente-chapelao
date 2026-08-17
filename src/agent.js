@@ -8,7 +8,7 @@ const {
 const { avaliarRascunho, descreverFaltando, parseItens, rotuloPagamento } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
 const {
-  MODEL_AGENTE, EFFORT_AGENTE, EFFORT_FOLLOWUP, MAX_TOKENS_AGENTE,
+  MODEL_AGENTE, MODEL_VISAO, EFFORT_AGENTE, EFFORT_FOLLOWUP, MAX_TOKENS_AGENTE,
   prazoOfertaTexto, TEXTO_HORARIO, fmtBRL,
 } = require('./config');
 const logger = require('./logger');
@@ -406,6 +406,10 @@ async function chamarModeloSimples(client, maxTokens, messages) {
 function modeloEmUso() {
   return {
     configurado: MODEL_AGENTE, em_uso: modeloAtivo,
+    // A leitura do comprovante PIX roda com modelo próprio (OPENAI_MODEL_VISAO).
+    // Aparece aqui porque é a única forma de conferir, sem mandar um comprovante
+    // de verdade, se a variável do EasyPanel pegou.
+    visao: MODEL_VISAO,
     reasoning_effort: effortDesligado ? '(nao enviado)' : efeitoAtual,
     param_tokens: tokensLegado ? 'max_tokens' : 'max_completion_tokens',
   };
