@@ -41,7 +41,7 @@ const DEFINICOES = [
   },
   {
     name: 'info_restaurante',
-    description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa.',
+    description: 'Retorna chave PIX, endereço, horário, PRAZO de entrega e retirada, status (aberta/fechada) e o contato para assuntos que não são pedido. Use para enviar PIX, responder horário, responder "quanto tempo demora?" e encaminhar assunto fora do cardápio.',
     parameters: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -101,7 +101,7 @@ const DEFINICOES = [
   },
   {
     name: 'chamar_atendente',
-    description: 'Chama um atendente HUMANO. Use SEMPRE que: você não souber responder algo com certeza; tiver qualquer dúvida real sobre o que fazer; o cliente pedir algo fora do fluxo normal (alterar pedido já fechado, cancelar, reclamar, negociar preço/desconto, pedir nota fiscal, perguntar sobre pedido anterior); ou acontecer qualquer coisa que você não consiga resolver sozinho com as outras tools. Na dúvida entre chutar e chamar — CHAME. O sistema cria um alerta no painel e pausa seu atendimento por 10 minutos para o atendente assumir.',
+    description: 'ÚLTIMO RECURSO. Chama um atendente humano E PAUSA seu atendimento por 10 minutos — a conversa para de verdade, então cada chamada sem necessidade é um cliente esperando à toa e uma venda que esfria. Use SOMENTE em: (1) reclamação sobre comida ou entrega que já saiu; (2) alterar ou cancelar pedido JÁ CONFIRMADO; (3) cobrança, valor pago errado, reembolso, nota fiscal; (4) cliente irritado ou pedindo o dono; (5) pergunta sobre pedido de outro dia. ⛔ NÃO chame para: nome de item que não bate com o cardápio (confirme com o cliente), falta de informação do pedido (pergunte), agendamento (recuse com educação), prazo (você já sabe), endereço incompleto (peça rua e número), mudar item antes de confirmar (é só salvar_dados_pedido de novo), assunto fora do cardápio (encaminhe para o contato de outros assuntos). Nesses casos você tem uma saída melhor que chamar humano: PERGUNTAR ao cliente.',
     parameters: {
       type: 'object',
       properties: {
@@ -242,6 +242,16 @@ async function executarTool(nome, args, contexto = {}) {
         // for conhecida (PIX sai por uma plataforma, dinheiro/cartão por outra).
         observacao_frete: 'NUNCA diga um valor de entrega por conta própria. A taxa varia por endereço e é calculada pela equipe. Peça o endereço e a forma de pagamento; o sistema cuida do resto e te entrega o valor pronto.',
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
+        // Prazo: o agente chamava atendente humano toda vez que perguntavam
+        // "quanto tempo demora?", porque essa informação simplesmente não
+        // existia em lugar nenhum que ele pudesse consultar.
+        prazo_entrega: info.prazo_entrega || '~35 minutos',
+        prazo_retirada: info.prazo_retirada || '~20 minutos',
+        observacao_prazo: 'Pode informar esse prazo com naturalidade, dizendo que é uma média e depende do movimento. Nunca prometa horário exato.',
+        // Assunto que não é comida (currículo, vaga, parceria, aluguel de
+        // coisa, telefone de outra unidade) tem dono: encaminhe e siga a
+        // conversa, em vez de pausar o atendimento.
+        contato_outros_assuntos: info.contato_outros_assuntos || '',
       });
     }
 
