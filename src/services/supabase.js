@@ -295,6 +295,55 @@ function precoFinal(p) {
   return Number(p.preco);
 }
 
+// ─── COMBOS ───────────────────────────────────────────────────────────────────
+// O combo tem preço fechado (não é a soma dos itens) e um teto de entrega que a
+// casa absorve. A composição vem de combo_itens, com FK pra produtos: é daqui
+// que o pedido é montado, nunca do que a LLM entendeu por "coca mini".
+async function buscarCombos() {
+  const { data, error } = await sb
+    .from('combos')
+    .select('id, slug, nome, preco, subsidio_frete_max, ordem_exibicao, combo_itens(quantidade, papel, rotulo_singular, rotulo_plural, produtos(id, nome))')
+    .eq('ativo', true)
+    .order('ordem_exibicao');
+  if (error) throw new Error(`Supabase.buscarCombos: ${error.message}`);
+
+  const ORDEM_PAPEL = ['marmita', 'sobremesa', 'bebida'];
+
+  return (data || []).map(c => ({
+    ...c,
+    preco: Number(c.preco),
+    subsidio_frete_max: Number(c.subsidio_frete_max),
+    itens: (c.combo_itens || [])
+      .map(ci => ({
+        produto_id: ci.produtos?.id,
+        // nome = o que o SISTEMA usa pra montar o pedido (tem que bater com produtos.nome).
+        // rotulo = o que o CLIENTE lê. Os dois nunca se misturam.
+        nome: (ci.produtos?.nome || '').trim(),
+        rotulo: ci.quantidade > 1
+          ? (ci.rotulo_plural || ci.rotulo_singular || (ci.produtos?.nome || '').trim())
+          : (ci.rotulo_singular || (ci.produtos?.nome || '').trim()),
+        quantidade: ci.quantidade,
+        papel: ci.papel,
+      }))
+      .sort((a, b) => ORDEM_PAPEL.indexOf(a.papel) - ORDEM_PAPEL.indexOf(b.papel)),
+  }));
+}
+
+// O rascunho guarda só o combo_id; toda precificação precisa do combo inteiro
+// (preço fechado + teto de subsídio). Resolver sempre pelo banco, e não por um
+// combo cacheado no rascunho, mantém a regra de repreçar a partir da fonte.
+async function buscarComboPorId(comboId) {
+  if (!comboId) return null;
+  return (await buscarCombos()).find(c => c.id === comboId) || null;
+}
+
+// Fórmula única de entrega, a mesma do banco (combo_frete_cliente): sem combo o
+// subsídio é zero, então avulso paga a entrega inteira pelo mesmo caminho — não
+// existe um "if avulso" separado que possa divergir.
+function freteCliente(freteCalculado, subsidioFreteMax = 0) {
+  return money(Math.max(0, Number(freteCalculado || 0) - Number(subsidioFreteMax || 0)));
+}
+
 const MAX_CARNES_MARMITEX = 2;
 const MAX_ACOMPANHAMENTOS_MARMITEX = 6;
 
@@ -746,7 +795,28 @@ async function darBaixaCupom(cupomId, pedidoId) {
 // Repreça sempre a partir do catálogo FRESCO por produto_id: não confia no
 // preço cacheado no rascunho, que pode ter envelhecido durante a conversa.
 
-async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega }) {
+// Confere se os itens do pedido são EXATAMENTE a composição do combo. Sem esta
+// checagem bastaria a LLM marcar "combo" num pedido qualquer pra 3 marmitas
+// grandes saírem pelo preço de uma — é a mesma classe de furo do brinde, onde
+// item escolhido por texto livre virava comida de graça.
+function conferirComposicaoDoCombo(combo, itensValidados) {
+  const esperado = new Map();
+  for (const i of combo.itens) {
+    esperado.set(i.produto_id, (esperado.get(i.produto_id) || 0) + i.quantidade);
+  }
+  const recebido = new Map();
+  for (const i of itensValidados) {
+    recebido.set(i.produto_id, (recebido.get(i.produto_id) || 0) + Number(i.quantidade || 0));
+  }
+
+  if (esperado.size !== recebido.size) return false;
+  for (const [produtoId, qtd] of esperado) {
+    if (recebido.get(produtoId) !== qtd) return false;
+  }
+  return true;
+}
+
+async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega, combo }) {
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
 
@@ -779,13 +849,26 @@ async function precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEn
     return { ...i, preco_unitario: precoFinal(prod) };
   });
 
-  const totais = calcularTotais({ itens: listaRepreçada, tipoEntrega, cupom, taxaEntrega });
-  return { itens: listaRepreçada, brindes: listaBrinde, ...totais };
+  // Combo só vale se a composição bater. Não bateu, cai pro preço avulso: o
+  // cliente paga a soma real do que pediu, em vez de um preço de combo que
+  // não corresponde ao que vai sair da cozinha.
+  let comboAplicado = combo || null;
+  if (comboAplicado && !conferirComposicaoDoCombo(comboAplicado, listaRepreçada)) {
+    logger.warn('pedido/combo-composicao-divergente', 'Combo ignorado: itens não batem com a composição', {
+      combo: comboAplicado.slug,
+      esperado: comboAplicado.itens.map(i => `${i.quantidade}x ${i.nome}`),
+      recebido: listaRepreçada.map(i => `${i.quantidade}x ${i.nome}`),
+    });
+    comboAplicado = null;
+  }
+
+  const totais = calcularTotais({ itens: listaRepreçada, tipoEntrega, cupom, taxaEntrega, combo: comboAplicado });
+  return { itens: listaRepreçada, brindes: listaBrinde, combo: comboAplicado, ...totais };
 }
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, taxaEntrega, itens, cupom, itensBrinde, observacaoGeral }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, trocoPara, taxaEntrega, itens, cupom, itensBrinde, observacaoGeral, combo }) {
   const tel = String(telefone).replace(/\D/g, '');
 
   // `taxaCobrada` (e não taxaEntrega) porque o parâmetro de entrada já usa esse
@@ -793,7 +876,8 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const {
     itens: listaRepreçada, brindes: listaBrinde,
     subtotal, taxaEntrega: taxaCobrada, desconto, total,
-  } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega });
+    combo: comboAplicado,
+  } = await precificarPedido({ itens, itensBrinde, tipoEntrega, cupom, taxaEntrega, combo });
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
   // Canal de origem do pedido, pra medir depois de onde vem cada venda.
@@ -819,6 +903,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       troco_para: troco,
       subtotal,
       taxa_entrega: taxaCobrada,
+      combo_id: comboAplicado ? comboAplicado.id : null,
       desconto,
       cupom_id: cupom ? cupom.id : null,
       total,
@@ -927,6 +1012,7 @@ module.exports = {
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho,
   tentarIniciarConfirmacao, tentarIniciarPagamento,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo,
+  buscarCombos, buscarComboPorId, freteCliente,
   buscarVideoBuffet, precificarPedido,
   solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarTaxasEstouradas, buscarTaxaPadrao,

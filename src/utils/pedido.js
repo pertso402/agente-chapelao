@@ -87,11 +87,19 @@ function calcularSubtotal(itens) {
 // null/undefined em delivery significa "ainda não calculada", e isso deixa o
 // pedido incompleto de propósito (ver avaliarRascunho): sem a taxa não dá pra
 // mostrar total, e mostrar total errado foi o bug que originou tudo isto.
-function calcularTotais({ itens, tipoEntrega, cupom, taxaEntrega }) {
-  const subtotal = calcularSubtotal(itens);
+// `combo`, quando presente, muda DUAS coisas e nada mais:
+//   1. o subtotal passa a ser o preço fechado do combo (a soma dos itens é
+//      sempre maior — essa diferença é o desconto do combo);
+//   2. a entrega ganha um subsídio até o teto do combo.
+// Sem combo o subsídio é zero, então o pedido avulso paga a entrega inteira
+// pelo MESMO caminho de cálculo — não existe um "if avulso" que possa divergir.
+function calcularTotais({ itens, tipoEntrega, cupom, taxaEntrega, combo }) {
+  const subtotal = combo ? money(combo.preco) : calcularSubtotal(itens);
 
   const ehDelivery = tipoEntrega === 'delivery';
-  const taxa = ehDelivery ? money(taxaEntrega || 0) : 0;
+  const taxaCheia = ehDelivery ? money(taxaEntrega || 0) : 0;
+  const subsidio = ehDelivery ? money(combo?.subsidio_frete_max || 0) : 0;
+  const taxa = money(Math.max(0, taxaCheia - subsidio));
 
   // Cupom de brinde não abate percentual — o benefício são os itens grátis.
   const ehBrinde = cupom?.tipo === 'brinde';
@@ -100,7 +108,16 @@ function calcularTotais({ itens, tipoEntrega, cupom, taxaEntrega }) {
     : 0;
 
   const total = money(subtotal + taxa - desconto);
-  return { subtotal, taxaEntrega: taxa, desconto, total };
+  // taxaEntregaCheia e subsidioEntrega saem daqui pro resumo poder dizer
+  // "a gente cobriu R$ X da entrega" com número real, em vez de só sumir.
+  return {
+    subtotal,
+    taxaEntrega: taxa,
+    taxaEntregaCheia: taxaCheia,
+    subsidioEntrega: money(Math.min(subsidio, taxaCheia)),
+    desconto,
+    total,
+  };
 }
 
 // ─── RESUMO FINAL (texto pronto pro WhatsApp) ─────────────────────────────────
@@ -124,12 +141,23 @@ function linhaTroco(formaPagamento, trocoPara, total) {
   return `💵 Troco para ${fmtBRL(trocoPara)} — levo ${fmtBRL(troco)}`;
 }
 
-function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamento, trocoPara, totais, cupomCodigo }) {
+function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamento, trocoPara, totais, cupomCodigo, combo }) {
   const linhas = [];
   linhas.push('🎩 *Confira seu pedido:*');
   linhas.push('');
 
-  for (const i of parseItens(itens)) linhas.push(linhaItem(i));
+  if (combo) {
+    // Com combo, o preço é do PACOTE. Listar o preço avulso de cada item faria
+    // as linhas somarem mais que o subtotal (R$31 de itens contra R$29,90 de
+    // subtotal), e o cliente que confere a conta acha que tem erro.
+    linhas.push(`🍱 *${combo.nome}* — ${fmtBRL(totais.subtotal)}`);
+    for (const i of parseItens(itens)) {
+      const obs = i.observacao ? ` _(${i.observacao})_` : '';
+      linhas.push(`   ▪ ${Number(i.quantidade) || 1}x ${i.nome}${obs}`);
+    }
+  } else {
+    for (const i of parseItens(itens)) linhas.push(linhaItem(i));
+  }
   for (const b of parseItens(brindes)) {
     linhas.push(`🎁 ${Number(b.quantidade) || 1}x ${b.nome} — *cortesia*`);
   }
@@ -143,7 +171,19 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   linhas.push(`🛍️ Subtotal: ${fmtBRL(totais.subtotal)}`);
   // Em delivery a linha da taxa aparece SEMPRE, mesmo que seja zero: o cliente
   // precisa ver que a entrega foi contabilizada, senão ele desconfia do total.
-  if (tipoEntrega === 'delivery') linhas.push(`🚴 Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`);
+  // "Entrega" e não "taxa": taxa soa como cobrança extra inventada pela casa,
+  // e a objeção "vocês ganham no frete" nascia dessa palavra. O complemento
+  // sobre pra onde vai o dinheiro é verdade e desarma a objeção no resumo.
+  if (tipoEntrega === 'delivery') {
+    const subsidio = Number(totais.subsidioEntrega || 0);
+    if (totais.taxaEntrega > 0) {
+      linhas.push(subsidio > 0
+        ? `🚴 Entrega: ${fmtBRL(totais.taxaEntrega)} _(cobrimos ${fmtBRL(subsidio)} do combo)_`
+        : `🚴 Entrega: ${fmtBRL(totais.taxaEntrega)} _(vai 100% pro entregador)_`);
+    } else {
+      linhas.push('🚴 Entrega: *por nossa conta* 🎉');
+    }
+  }
   if (totais.desconto > 0)    linhas.push(`🏷️ Desconto${cupomCodigo ? ` (${cupomCodigo})` : ''}: -${fmtBRL(totais.desconto)}`);
   linhas.push(`💰 *Total: ${fmtBRL(totais.total)}*`);
 

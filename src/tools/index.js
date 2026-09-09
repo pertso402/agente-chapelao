@@ -79,6 +79,10 @@ const DEFINICOES = [
             required: ['nome', 'quantidade'],
           },
         },
+        combo: {
+          type: 'string',
+          description: 'Nome do combo escolhido pelo cliente, exatamente como apareceu em buscar_itens_do_dia (ex: "Almoço de Dois"). Envie SÓ quando o cliente aceitar um combo, e nesse caso o campo "itens" tem que conter EXATAMENTE a composição daquele combo (as marmitas com as carnes/acompanhamentos que ele escolheu, mais as sobremesas e bebidas do combo). Se a composição não bater, o sistema cobra pelo preço avulso. Para desfazer o combo, envie string vazia.',
+        },
         tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
         endereco:        { type: 'string', description: 'Endereço completo (só se delivery)' },
         forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
@@ -192,9 +196,10 @@ async function executarTool(nome, args, contexto = {}) {
       // loja. Por isso as carnes, os acompanhamentos e os PREÇOS dos tamanhos
       // vêm juntos numa mensagem só: o cliente decide sem precisar perguntar
       // "e quanto custa?".
-      const [itens, produtos] = await Promise.all([
+      const [itens, produtos, combos] = await Promise.all([
         db.buscarItensDoDia(),
         db.buscarProdutos(),
+        db.buscarCombos(),
       ]);
 
       const marmitas = produtos
@@ -202,7 +207,23 @@ async function executarTool(nome, args, contexto = {}) {
         .sort((a, b) => db.precoFinal(a) - db.precoFinal(b));
 
       const linhasPreco = marmitas.length
-        ? '\n💰 *Tamanhos:*\n' + marmitas.map(p => `🍱 ${p.nome.trim()} — ${fmtBRL(db.precoFinal(p))}`).join('\n')
+        ? '\n💰 *Avulsas:*\n' + marmitas.map(p => `🍱 ${p.nome.trim()} — ${fmtBRL(db.precoFinal(p))}`).join('\n')
+          + '\n_(entrega à parte — 100% do valor vai pro entregador)_'
+        : '';
+
+      // REGRA 1: combo é cardápio, não oferta extra — sai no MESMO bloco. Mandar
+      // o cardápio primeiro e o combo depois transforma o combo em "empurrão de
+      // venda", que é justamente o que faz o cliente travar na avulsa.
+      const emoji = { almoco_resolvido: '🍱', almoco_de_dois: '🍱🍱', mesa_cheia: '🍱🍱🍱' };
+      const linhasCombo = combos.length
+        ? '\n\n🔥 *Combos — a entrega é por nossa conta:*\n' + combos.map(c => {
+            // Rótulo de cliente, nunca o nome interno do produto: "Grande + sobremesa
+            // + Coca mini" e não "Marmitex Grande + Sobremesa 75ml + Refrigerante 200ml Pet".
+            const desc = c.itens
+              .map(i => `${i.quantidade > 1 ? `${i.quantidade} ` : ''}${i.rotulo}`)
+              .join(' + ');
+            return `${emoji[c.slug] || '🍱'} *${c.nome}* — ${desc} — ${fmtBRL(c.preco)}`;
+          }).join('\n')
         : '';
 
       if (!itens) {
@@ -219,9 +240,11 @@ async function executarTool(nome, args, contexto = {}) {
       if (itens.carne.length) txt += `🥩 *Carnes* (escolha até 2):\n${itens.carne.join(' · ')}\n\n`;
       if (acompanhamentos.length) txt += `🍚 *Acompanhamentos* (escolha até 6):\n${acompanhamentos.join(' · ')}\n`;
       txt += linhasPreco;
+      txt += linhasCombo;
 
       return txt.trim() +
-        '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com UMA pergunta de escolha, tipo "Prefere a Média ou a Grande?". Não liste o resto da loja.' +
+        '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com a pergunta "É pra uma pessoa ou pra mais de uma?" — NUNCA "Média ou Grande?", que trava o cliente na avulsa antes dele ler os combos. Não liste o resto da loja.' +
+        ' Esta apresentação do cardápio JÁ CONTA como a oferta de combo da conversa (REGRA 2): não ofereça combo de novo depois disso, exceto no caso da REGRA 3.' +
         ' O cliente fala como gente, não como cardápio: "porco" é a carne suína do dia (paleta, pernil, lombo, costelinha), "boi"/"carne" é a bovina (bife, costela, almôndega, patinho), "frango" é a de ave (coxa, sobrecoxa, filé). Faça essa tradução VOCÊ, em silêncio, e confirme de forma natural — "boa, hoje o porco é paleta suína assada ✅".' +
         ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.]';
     }
@@ -270,6 +293,23 @@ async function executarTool(nome, args, contexto = {}) {
       // contra null/undefined, não contra "valor falsy".
       if (args.troco_para != null) campos.troco_para = Math.max(0, Number(args.troco_para) || 0);
 
+      // Combo vem pelo nome que o cliente viu no cardápio; o que é gravado é o
+      // id. Nome desconhecido não vira combo silenciosamente — o agente é
+      // avisado, senão o cliente ouviria um preço de combo que não existe.
+      let comboDesconhecido = null;
+      if (args.combo != null) {
+        const alvo = normalizar(args.combo);
+        if (!alvo) {
+          campos.combo_id = null;
+        } else {
+          const achado = (await db.buscarCombos()).find(
+            c => normalizar(c.nome) === alvo || normalizar(c.slug) === alvo
+          );
+          if (achado) campos.combo_id = achado.id;
+          else comboDesconhecido = args.combo;
+        }
+      }
+
       // Chamada sem nenhum campo é legítima: é assim que o agente pede o
       // RESUMO_FINAL_TEXTO_EXATO quando o pedido já estava completo antes
       // desta mensagem (ex.: cliente disse "e aí, quanto ficou?").
@@ -286,6 +326,9 @@ async function executarTool(nome, args, contexto = {}) {
 
       const itens = parseItens(rascunho.itens);
       const brindes = parseItens(rascunho.itens_brinde);
+      const comboAtivo = rascunho.combo_id
+        ? (await db.buscarCombos()).find(c => c.id === rascunho.combo_id) || null
+        : null;
 
       // Primeiro sinal real de interesse (carrinho montado) — alimenta a tag do cliente
       if (itens.length) db.marcarInteresse(telefone).catch(() => {});
@@ -305,6 +348,13 @@ async function executarTool(nome, args, contexto = {}) {
       };
 
       if (avisos?.length) resumo.AVISOS = avisos;
+
+      if (comboAtivo) {
+        resumo.combo = `${comboAtivo.nome} — ${fmtBRL(comboAtivo.preco)} (entrega por nossa conta até ${fmtBRL(comboAtivo.subsidio_frete_max)})`;
+      }
+      if (comboDesconhecido) {
+        resumo.ATENCAO_combo_inexistente = `Não existe combo chamado "${comboDesconhecido}". Use o nome exato que veio em buscar_itens_do_dia, ou siga com os itens avulsos. NÃO prometa preço de combo pro cliente.`;
+      }
 
       // ── Munição de venda, já calculada ──────────────────────────────────
       // O agente não faz conta: ele recebe o número pronto. O subtotal aqui é
@@ -355,7 +405,15 @@ async function executarTool(nome, args, contexto = {}) {
           tipoEntrega: rascunho.tipo_entrega,
           cupom: ofertaAtiva || null,
           taxaEntrega: rascunho.taxa_entrega,
+          combo: comboAtivo,
         });
+
+        // A precificação recusa o combo se a composição não bater. Avisar aqui
+        // evita o pior caso: o agente já ter prometido o preço do combo e o
+        // resumo sair mais caro, sem ninguém entender por quê.
+        if (comboAtivo && !p.combo) {
+          resumo.ATENCAO_combo_nao_aplicado = `Os itens do pedido não batem com a composição do ${comboAtivo.nome}, então o preço saiu avulso. Confira com o cliente o que ele quer: monte a composição exata do combo, ou siga avulso e NÃO cite mais o preço do combo.`;
+        }
 
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';
         resumo.subtotal = fmtBRL(p.subtotal);
@@ -371,6 +429,7 @@ async function executarTool(nome, args, contexto = {}) {
           trocoPara: rascunho.troco_para,
           totais: p,
           cupomCodigo: ofertaAtiva?.codigo,
+          combo: p.combo,
         });
         resumo.instrucao_final =
           'ENVIE O CAMPO RESUMO_FINAL_TEXTO_EXATO COMO SUA RESPOSTA, LETRA POR LETRA, ' +

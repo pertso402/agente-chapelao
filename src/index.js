@@ -13,6 +13,7 @@ const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho, atualizarRascunho,
   precificarPedido, buscarTaxasEstouradas, buscarTaxaPadrao,
+  buscarComboPorId, freteCliente,
   definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarInfo, buscarVideoBuffet, criarPedidoCompleto, tentarIniciarPagamento,
   buscarCupomAtivoPorTelefone,
@@ -900,11 +901,20 @@ async function pollarTaxas() {
       const { rascunho, avaliacao } = await atualizarRascunho(telefone, {});
       const taxa = Number(rascunho.taxa_entrega);
 
+      // Com combo, o cliente não paga o frete cheio — anunciar o valor bruto
+      // aqui seria dar um susto e desmentir o "entrega por nossa conta" que ele
+      // acabou de ouvir. A frase abaixo mostra o que ELE paga.
+      const comboDoPedido = await buscarComboPorId(rascunho.combo_id).catch(() => null);
+      const taxaCliente = freteCliente(taxa, comboDoPedido?.subsidio_frete_max || 0);
+      const frase = taxaCliente > 0
+        ? `Confirmei a entrega pro seu endereço: *${fmt(taxaCliente)}* 🚴`
+        : 'Confirmei a entrega pro seu endereço: *por nossa conta* 🎉';
+
       if (!avaliacao.completo) {
         // Falta outra coisa (nome, por exemplo). Manda só a taxa — o total
         // ainda não pode ser dito, e dizer total incompleto é o bug original.
         await responder(telefone,
-          `Confirmei a entrega pro seu endereço: *${fmt(taxa)}* 🚴\n\nSó preciso de mais uma coisinha: ${descreverFaltando(avaliacao.faltando)}.`,
+          `${frase}\n\nSó preciso de mais uma coisinha: ${descreverFaltando(avaliacao.faltando)}.`,
           { requestId, etapa: 'taxa-parcial' });
         continue;
       }
@@ -916,6 +926,7 @@ async function pollarTaxas() {
         tipoEntrega: rascunho.tipo_entrega,
         cupom:       cupom || null,
         taxaEntrega: rascunho.taxa_entrega,
+        combo:       comboDoPedido,
       });
 
       const resumo = montarResumoFinal({
@@ -927,10 +938,11 @@ async function pollarTaxas() {
         trocoPara:      rascunho.troco_para,
         totais,
         cupomCodigo:    cupom?.codigo,
+        combo:          totais.combo,
       });
 
       await responder(telefone,
-        `Confirmei a entrega pro seu endereço: *${fmt(taxa)}* 🚴\n\n${resumo}`,
+        `${frase}\n\n${resumo}`,
         { requestId, etapa: 'taxa-definida' });
 
       logger.info('taxa/cliente-avisado', 'Taxa calculada e resumo enviado', {
