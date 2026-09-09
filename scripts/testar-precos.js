@@ -134,7 +134,7 @@ teste('o resumo mostra EXATAMENTE a taxa que o pedido vai cobrar', () => {
 
   // Este é o bug original: qualquer divergência entre o número mostrado e o
   // número cobrado tem que quebrar o teste.
-  assert.ok(texto.includes(`Taxa de entrega: ${fmtBRL(totais.taxaEntrega)}`),
+  assert.ok(texto.includes(`Entrega: ${fmtBRL(totais.taxaEntrega)}`),
     `resumo não traz a taxa calculada (${fmtBRL(totais.taxaEntrega)}):\n${texto}`);
   assert.ok(texto.includes(`*Total: ${fmtBRL(totais.total)}*`), 'total do resumo diverge do calculado');
   assert.ok(!texto.includes('R$ 5,00'), 'resumo voltou a mostrar a taxa antiga de R$ 5,00');
@@ -146,21 +146,21 @@ teste('taxa diferente muda o texto E o total juntos', () => {
     itens: ITENS, brindes: [], tipoEntrega: 'delivery',
     endereco: 'Rua Longe, 900', formaPagamento: 'pix', totais,
   });
-  assert.ok(texto.includes('Taxa de entrega: R$ 18,50'), `taxa não apareceu:\n${texto}`);
+  assert.ok(texto.includes('Entrega: R$ 18,50'), `entrega não apareceu:\n${texto}`);
   assert.ok(texto.includes('*Total: R$ 51,00*'), `total errado (32,50 + 18,50):\n${texto}`);
 });
 
-teste('resumo nunca promete frete grátis', () => {
-  const totais = calcularTotais({
-    itens: [{ nome: 'Marmitex Média', quantidade: 3, preco_unitario: 26.5 }],
-    tipoEntrega: 'delivery', taxaEntrega: 9,
-  });
+teste('pedido grande NÃO ganha entrega de graça só por ser grande', () => {
+  // Não existe mais "frete grátis acima de X reais". Entrega só sai por conta
+  // da casa quando um COMBO subsidia — e isso chega em subsidioEntrega, nunca
+  // do tamanho do pedido.
+  const itens = [{ nome: 'Marmitex Média', quantidade: 3, preco_unitario: 26.5 }];
+  const totais = calcularTotais({ itens, tipoEntrega: 'delivery', taxaEntrega: 9 });
   const texto = montarResumoFinal({
-    itens: [{ nome: 'Marmitex Média', quantidade: 3, preco_unitario: 26.5 }],
-    brindes: [], tipoEntrega: 'delivery', endereco: 'Rua X', formaPagamento: 'pix', totais,
+    itens, brindes: [], tipoEntrega: 'delivery', endereco: 'Rua X', formaPagamento: 'pix', totais,
   });
-  assert.ok(!/gr[áa]tis/i.test(texto), `frete grátis foi removido do negócio:\n${texto}`);
-  assert.ok(texto.includes('Taxa de entrega: R$ 9,00'), 'pedido grande também paga entrega');
+  assert.ok(texto.includes('Entrega: R$ 9,00'), `pedido grande também paga entrega:\n${texto}`);
+  assert.ok(!/por nossa conta/i.test(texto), 'prometeu entrega grátis sem combo nenhum');
 });
 
 teste('resumo de retirada não mostra linha de taxa', () => {
@@ -169,7 +169,7 @@ teste('resumo de retirada não mostra linha de taxa', () => {
     itens: ITENS, brindes: [], tipoEntrega: 'retirada',
     formaPagamento: 'dinheiro', totais,
   });
-  assert.ok(!texto.includes('Taxa de entrega'), 'retirada não deve exibir taxa');
+  assert.ok(!/Entrega: R$/.test(texto), 'retirada não deve exibir linha de entrega');
   assert.ok(texto.includes('Retirada no local'));
 });
 

@@ -170,8 +170,28 @@ const CONFIRMACOES_PREFIXO = [
 ];
 const RESSALVA = /\b(mas|so que|so quero|quero mudar|muda|troca|corrige|corrigir|errado|espera|pera|calma|antes|na verdade|ainda nao|primeiro)\b/;
 
+// Emoji vale como "sim". Uma cliente respondeu o resumo com 👍 e o pedido
+// nunca foi criado: o joinha não estava em lista nenhuma, o sistema seguiu
+// esperando a palavra, e ela achou que já tinha confirmado.
+const CONFIRMACOES_EMOJI = new Set([
+  '👍', '👍🏻', '👍🏼', '👍🏽', '👍🏾', '👍🏿',
+  '👌', '👌🏻', '👌🏼', '👌🏽', '👌🏾', '👌🏿',
+  '✅', '☑️', '✔️', '🆗', '🙏', '❤️', '❤', '👏', '🤝',
+]);
+
 function ehConfirmacao(texto) {
-  const t = normalizar(String(texto || '')).replace(/[.!,]+$/, '');
+  const bruto = String(texto || '').trim();
+  if (!bruto) return false;
+
+  // Reação do WhatsApp ou mensagem só com emoji: o conteúdo inteiro é o emoji.
+  if (CONFIRMACOES_EMOJI.has(bruto)) return true;
+
+  // Tira pontuação e emoji das pontas. Antes só caíam ". ! ,", então um
+  // "sim[" — tecla errada no celular, aconteceu de verdade — não batia com
+  // nada e o cliente recebia o resumo outra vez, como se não tivesse falado.
+  const t = normalizar(bruto)
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}]+$/u, '');
   if (!t) return false;
   if (RESSALVA.test(t)) return false;
   if (CONFIRMACOES_EXATAS.has(t)) return true;
@@ -470,6 +490,30 @@ async function processarMensagem(msg, requestId) {
         { requestId, etapa: 'pix/pedirFoto' }
       );
       return;
+    }
+
+    // ── Comprovante que chega ANTES da hora ─────────────────────────────────
+    // O cliente manda o comprovante quando quer, não quando o roteiro pede.
+    // Perguntamos "PIX, dinheiro ou cartão?" e ele responde mandando o
+    // comprovante — que já diz as duas coisas: a forma é PIX e ele já pagou.
+    // Antes isso caía na LLM como uma imagem qualquer e ela insistia na
+    // pergunta, porque o campo forma_pagamento continuava vazio.
+    //
+    // Aqui só anotamos a forma de pagamento e avisamos a LLM do que aconteceu.
+    // O pedido NÃO é criado por este caminho: sem total fechado não há contra o
+    // que conferir o valor pago (isso é FLUXO 1, mais abaixo).
+    if (isComprovante && rascunho?.etapa_atual !== 'aguardando_pix') {
+      logger.info('pix/comprovante-adiantado', 'Comprovante chegou antes do pedido fechar', {
+        requestId, telefone, etapa: rascunho?.etapa_atual || 'sem rascunho', valor: comprovanteValor,
+      });
+
+      if (rascunho && rascunho.forma_pagamento !== 'pix') {
+        await atualizarRascunho(telefone, { forma_pagamento: 'pix' })
+          .catch(err => logger.warn('pix/anotar-forma-falhou', err.message, { requestId, telefone }));
+      }
+
+      const valorLido = comprovanteValor != null ? ` no valor de ${fmt(comprovanteValor)}` : '';
+      conteudo += `\n\n[INSTRUÇÃO INTERNA — não repita isto pro cliente: ele MANDOU O COMPROVANTE${valorLido}, ou seja, escolheu PIX e já pagou. A forma de pagamento já foi anotada como PIX — não pergunte de novo. Agradeça o comprovante, siga com o que ainda falta pro pedido ficar completo e, quando estiver tudo, mande o RESUMO_FINAL_TEXTO_EXATO. Se o valor pago não fechar com o total, NÃO discuta: chame o atendente.]`;
     }
 
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
@@ -998,5 +1042,5 @@ if (require.main === module) {
 
 module.exports = {
   app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas,
-  _testes: { agruparMensagem, despachar },
+  _testes: { agruparMensagem, despachar, ehConfirmacao },
 };

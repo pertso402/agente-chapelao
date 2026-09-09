@@ -246,7 +246,8 @@ async function executarTool(nome, args, contexto = {}) {
         '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com a pergunta "É pra uma pessoa ou pra mais de uma?" — NUNCA "Média ou Grande?", que trava o cliente na avulsa antes dele ler os combos. Não liste o resto da loja.' +
         ' Esta apresentação do cardápio JÁ CONTA como a oferta de combo da conversa (REGRA 2): não ofereça combo de novo depois disso, exceto no caso da REGRA 3.' +
         ' O cliente fala como gente, não como cardápio: "porco" é a carne suína do dia (paleta, pernil, lombo, costelinha), "boi"/"carne" é a bovina (bife, costela, almôndega, patinho), "frango" é a de ave (coxa, sobrecoxa, filé). Faça essa tradução VOCÊ, em silêncio, e confirme de forma natural — "boa, hoje o porco é paleta suína assada ✅".' +
-        ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.]';
+        ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.' +
+        ' SALADA TEM TODO DIA, mesmo que não apareça na lista acima. Se o cliente perguntar ou pedir salada, confirme que sim e inclua nos acompanhamentos dele. Nunca diga que não tem, nunca chame atendente por causa de salada.]';
     }
 
     case 'info_restaurante': {

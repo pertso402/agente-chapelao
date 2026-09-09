@@ -22,6 +22,9 @@ require.cache[caminhoDb] = {
   id: caminhoDb, filename: caminhoDb, loaded: true,
   exports: {
     tentarIniciarConfirmacao: async () => true,
+    // Combos entraram depois deste teste; sem esta linha ele quebrava com
+    // "buscarComboPorId is not a function" e escondia o que de fato testa.
+    buscarComboPorId: async () => null,
     salvarRascunho: async (tel, campos) => { registro.salvou.push(campos); },
     limparRascunho: async () => { registro.salvou.push({ LIMPOU: true }); },
     precificarPedido: async () => {

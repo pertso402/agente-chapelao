@@ -349,6 +349,13 @@ const MAX_ACOMPANHAMENTOS_MARMITEX = 6;
 
 // Valida itens contra o catálogo: preço real, nome canônico, produto_id.
 // Itens sem correspondência voltam em naoEncontrados (não são salvos).
+// Salada é o único acompanhamento que não depende do cardápio do dia: a casa
+// tem todo dia. Casa por pedaço do nome pra aceitar como o cliente escreve —
+// "salada", "salada verde", "saladinha", "só uma salada".
+function ehSalada(nome) {
+  return /salad/.test(normalizar(nome));
+}
+
 // Pra itens de Marmitex, também valida carnes/acompanhamentos escolhidos
 // contra o que está disponível HOJE e aplica o limite de 2 carnes / 6
 // acompanhamentos — nunca confia só no que a LLM mandou. Avisos de corte
@@ -393,11 +400,18 @@ async function validarItens(itensInput) {
 
       const carnesPedidas = item.carnes || [];
       const acompPedidos = item.acompanhamentos || [];
+
+      // Salada tem TODO dia, esteja ou não marcada no cardápio do dia. Sem
+      // esta exceção o pedido de salada era descartado aqui em silêncio: o
+      // agente dizia "incluí" e a cozinha nunca via, porque "Salada" não
+      // estava na lista marcada no painel.
+      const acompValido = (a) => permitidosAcomp.includes(normalizar(a)) || ehSalada(a);
+
       const carnesValidas = carnesPedidas.filter(c => permitidosCarne.includes(normalizar(c)));
-      const acompValidos = acompPedidos.filter(a => permitidosAcomp.includes(normalizar(a)));
+      const acompValidos = acompPedidos.filter(acompValido);
 
       const carnesForaDoDia = carnesPedidas.filter(c => !permitidosCarne.includes(normalizar(c)));
-      const acompForaDoDia = acompPedidos.filter(a => !permitidosAcomp.includes(normalizar(a)));
+      const acompForaDoDia = acompPedidos.filter(a => !acompValido(a));
       if (carnesForaDoDia.length) avisos.push(`Carnes fora do cardápio de hoje (ignoradas): ${carnesForaDoDia.join(', ')}`);
       if (acompForaDoDia.length) avisos.push(`Acompanhamentos fora do cardápio de hoje (ignorados): ${acompForaDoDia.join(', ')}`);
 

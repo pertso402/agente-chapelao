@@ -94,6 +94,15 @@ function extrairMensagem(body) {
     // não é um "documento qualquer": index.js precisa saber diferenciar pra
     // não deixar a LLM tentar adivinhar o que fazer com isso.
     texto = '[Documento recebido]';
+  } else if (messageType === 'reactionMessage') {
+    // Reagir com 👍 na mensagem é resposta pra muita gente — e caía aqui como
+    // "tipo não suportado", ou seja, o agente nunca ficava sabendo. Uma cliente
+    // deu joinha no resumo do pedido e o pedido simplesmente não foi criado.
+    // Vira texto do emoji e segue o fluxo normal de confirmação.
+    const emoji = message.reactionMessage?.text || '';
+    if (!emoji) return null;   // remover a reação manda text vazio: ignora
+    texto = emoji;
+    tipo = 'text';
   } else if (messageType === 'locationMessage' || messageType === 'liveLocationMessage') {
     // Localização (fixa ou em tempo real): converte pra um link de mapa e trata
     // como texto normal — o agente entende isso como o endereço do cliente,
