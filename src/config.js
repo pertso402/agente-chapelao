@@ -47,8 +47,10 @@ const MODEL_VISAO  = process.env.OPENAI_MODEL_VISAO || 'gpt-5.6-terra';
 // resposta mais rápida no WhatsApp.
 const EFFORT_AGENTE = process.env.OPENAI_EFFORT || 'none';
 
-// O follow-up não usa tools, então pode raciocinar à vontade.
-const EFFORT_FOLLOWUP = process.env.OPENAI_EFFORT_FOLLOWUP || 'low';
+// O follow-up escreve DUAS FRASES de retomada: não decide nada, não usa tool,
+// não faz conta. Token de raciocínio é cobrado como saída — a parte cara — e
+// aqui não muda o resultado. Por isso 'none'.
+const EFFORT_FOLLOWUP = process.env.OPENAI_EFFORT_FOLLOWUP || 'none';
 
 const MAX_TOKENS_AGENTE = Number(process.env.OPENAI_MAX_TOKENS || 3000);
 

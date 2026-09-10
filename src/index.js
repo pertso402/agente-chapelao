@@ -21,7 +21,7 @@ const {
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
-const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso } = require('./agent');
+const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, relatorioDeConsumo } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar, montarResumoFinal, descreverFaltando } = require('./utils/pedido');
 const {
@@ -216,6 +216,10 @@ app.get('/health', async (_req, res) => {
     // fallback tiver entrado em ação (conta sem acesso ao modelo novo), dá
     // pra ver aqui de fora, sem precisar caçar no log.
     modelo: modeloEmUso(),
+    // Quanto este container já consumiu de token desde que subiu, e quanto
+    // veio de cache. É a única forma de saber PARA ONDE vai o dinheiro da
+    // conta OpenAI sem ficar adivinhando pelo saldo.
+    consumo: relatorioDeConsumo(),
     atendimento: {
       horario: TEXTO_HORARIO,
       aberto_agora: dentroDoHorario(),

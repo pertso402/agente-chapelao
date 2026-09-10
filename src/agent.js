@@ -188,9 +188,13 @@ Exemplo: "esse assunto quem cuida é o Claudecir, no +55 44 8454-4295 😊 Posso
 - Reclamação de comida ou de entrega que já saiu
 - Alterar ou cancelar pedido JÁ CONFIRMADO
 - Cobrança, valor pago errado, reembolso, nota fiscal
+- Pedido de desconto ou negociação de preço (explicar o preço é com você; negociar, não)
 - Cliente irritado, ou pedindo para falar com o dono
 - Pergunta sobre pedido de outro dia
 - Pedido de "só a mistura", sem marmita (depende do dia, quem decide é a equipe)
+- Você tentou entender por escrito e por áudio e continua sem entender
+
+Depois de chamar, mande UMA frase curta avisando que um atendente assume em instantes — e pare. Não continue o pedido, não faça mais perguntas.
 
 
 ## FLUXO DE ATENDIMENTO (conduza ativamente)
@@ -221,19 +225,6 @@ Se a transcrição vier truncada, sem sentido, ou ambígua sobre item/quantidade
 - NÃO adivinhe e NÃO salve nada.
 - Peça, com leveza, que ele mande por escrito o que quer — em UMA frase curta. Ex: "Não consegui escutar direito 😅 Me manda por escrito o que você quer?"
 - Se o cliente insistir no áudio e você continuar sem entender, chame chamar_atendente.
-
-## QUANDO CHAMAR O ATENDENTE HUMANO (tool chamar_atendente)
-Chame SEMPRE que:
-- Você não souber responder algo com certeza, ou tiver qualquer dúvida real sobre o que fazer.
-- O cliente reclamar de algo que você não resolve (pedido anterior errado, demora, produto com problema).
-- O cliente pedir alteração ou cancelamento de pedido JÁ confirmado.
-- O cliente pedir desconto, negociar preço, pedir nota fiscal, ou perguntar de pagamento fora do padrão.
-- O cliente perguntar algo sobre o restaurante que nenhuma tool responde.
-- O cliente parecer irritado, confuso, ou repetir a mesma coisa porque você não entendeu.
-- Você não conseguir entender o que o cliente quer nem por áudio nem por escrito.
-- Qualquer coisa sair do fluxo normal de "montar pedido e fechar".
-
-Na dúvida entre arriscar e chamar: CHAME. Errar chamando atendente à toa custa barato; errar chutando custa um cliente. Depois de chamar, mande UMA frase curta avisando que um atendente vai assumir em instantes — e pare. Não continue o pedido, não faça perguntas, não tente resolver.
 
 ## REGRAS CRÍTICAS (NUNCA quebrar)
 ⛔ Fora dos combos, NUNCA escreva "frete incluso" ou "entrega grátis" — na marmita avulsa a entrega é sempre à parte e 100% por conta do cliente. Nos combos, "a entrega é por nossa conta" é verdade até o teto de cada combo; acima do teto o cliente paga só a diferença, e você avisa isso ao receber o endereço.
@@ -419,10 +410,51 @@ function montarPayload(messages, maxTokens = MAX_TOKENS_AGENTE) {
 
 // Tenta, corrige o que a API reclamar e tenta de novo. Limite de tentativas
 // pra nunca virar laço infinito em cima de um erro que não é de parâmetro.
-async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE) {
+// ─── CONTABILIDADE DE TOKENS ──────────────────────────────────────────────────
+// Sem isto o gasto da conta OpenAI é adivinhação: dá pra ver o saldo caindo,
+// mas não O QUE consumiu. Cada chamada soma aqui e o total sai no /health, com
+// a fatia que veio de cache (que custa uma fração do preço cheio).
+const consumo = {
+  desde: new Date().toISOString(),
+  chamadas: 0, entrada: 0, entradaCache: 0, saida: 0, raciocinio: 0,
+  porEtapa: {},
+};
+
+function contabilizar(etapa, usage) {
+  if (!usage) return;
+  const entrada = usage.prompt_tokens || 0;
+  const cache = usage.prompt_tokens_details?.cached_tokens || 0;
+  const saida = usage.completion_tokens || 0;
+  const raciocinio = usage.completion_tokens_details?.reasoning_tokens || 0;
+
+  consumo.chamadas++;
+  consumo.entrada += entrada;
+  consumo.entradaCache += cache;
+  consumo.saida += saida;
+  consumo.raciocinio += raciocinio;
+
+  const e = consumo.porEtapa[etapa] || (consumo.porEtapa[etapa] = { chamadas: 0, entrada: 0, cache: 0, saida: 0 });
+  e.chamadas++; e.entrada += entrada; e.cache += cache; e.saida += saida;
+}
+
+function relatorioDeConsumo() {
+  const semCache = consumo.entrada - consumo.entradaCache;
+  return {
+    ...consumo,
+    // A fatia cacheada é o que separa "prompt grande" de "prompt caro": o
+    // trecho fixo repetido a cada chamada só pesa de verdade quando NÃO cacheia.
+    cache_pct: consumo.entrada ? Math.round((consumo.entradaCache / consumo.entrada) * 100) : 0,
+    entrada_sem_cache: semCache,
+    entrada_media_por_chamada: consumo.chamadas ? Math.round(consumo.entrada / consumo.chamadas) : 0,
+  };
+}
+
+async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE, etapa = 'agente') {
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     try {
-      return await client.chat.completions.create(montarPayload(messages, maxTokens));
+      const r = await client.chat.completions.create(montarPayload(messages, maxTokens));
+      contabilizar(etapa, r.usage);
+      return r;
     } catch (err) {
       const tipoTokens = erroDeTokens(err);
 
@@ -483,7 +515,7 @@ async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE) {
 }
 
 // Chamada sem tools (follow-up). Mesma correção de parâmetros do agente.
-async function chamarModeloSimples(client, maxTokens, messages) {
+async function chamarModeloSimples(client, maxTokens, messages, etapa = 'simples') {
   const monta = () => {
     const p = { model: modeloAtivo, messages };
     if (tokensLegado) p.max_tokens = maxTokens;
@@ -494,7 +526,9 @@ async function chamarModeloSimples(client, maxTokens, messages) {
 
   for (let tentativa = 0; tentativa < 4; tentativa++) {
     try {
-      return await client.chat.completions.create(monta());
+      const r = await client.chat.completions.create(monta());
+      contabilizar(etapa, r.usage);
+      return r;
     } catch (err) {
       const tipoTokens = erroDeTokens(err);
 
@@ -769,16 +803,23 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
   // Usa o mesmo caminho protegido do agente: se o modelo novo não estiver
   // disponível, o follow-up também cai pro reserva em vez de falhar em silêncio
   // dentro do poller.
+  // O follow-up NÃO recebe o manual inteiro do atendimento (~6 mil tokens) —
+  // ele não vai tirar pedido, não usa tool nenhuma e não decide nada: só
+  // escreve duas frases pra retomar a conversa. Mandar o prompt completo pra
+  // isso era o desperdício mais caro do sistema, e ainda por cima com
+  // raciocínio ligado, que é cobrado como saída.
   const resposta = await comRetry(
-    () => chamarModeloSimples(client, 600, [
-        { role: 'system', content: SYSTEM_ESTATICO },
-        { role: 'system', content: montarContextoDinamico(rascunho, null) },
+    () => chamarModeloSimples(client, 200, [
+        {
+          role: 'system',
+          content: 'Você é o "Chapinha" 🎩, atendente do Restaurante Chapelão (marmitaria em Umuarama-PR), no WhatsApp. Português brasileiro natural e caloroso, emojis com moderação, *asterisco* pra negrito.',
+        },
         ...msgs,
         {
           role: 'system',
-          content: 'TAREFA AGORA: o cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando de onde parou — sem inventar informação nova, sem repetir o cardápio inteiro, sem citar valores, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
+          content: 'TAREFA AGORA: o cliente ficou em silêncio há alguns minutos no meio desta conversa. Escreva UMA mensagem curta (no máximo 2 frases), calorosa e natural, retomando de onde parou — sem inventar informação nova, sem repetir o cardápio, sem citar valores, sem soar como cobrança. Se já tinha itens escolhidos, convide gentilmente a fechar o pedido. Responda só com o texto da mensagem, nada mais.',
         },
-      ]),
+      ], 'followup'),
     { tentativas: 2, requestId, etapa: 'openai/followup' }
   );
 
@@ -788,7 +829,7 @@ async function gerarFollowup(historico, rascunho, requestId, telefone) {
 }
 
 module.exports = {
-  rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso,
+  rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, relatorioDeConsumo,
   SYSTEM_ESTATICO, montarContextoDinamico,
   // Exposto só para o teste de regressão dos parâmetros do modelo — foi um
   // erro aqui que derrubou o atendimento em produção.
