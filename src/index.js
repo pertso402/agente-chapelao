@@ -792,30 +792,10 @@ async function processarMensagem(msg, requestId) {
       // do texto. Ver a comida vende mais que ler a lista, e o vídeo chegando
       // primeiro faz a mensagem seguinte parecer a legenda dele.
       //
-      // Quem decide é o CÓDIGO (o agente usou uma tool de cardápio?), não a
-      // LLM: assim ela não promete vídeo que não existe nem esquece de mandar.
-      // Só manda UMA VEZ por pedido: cliente que pergunta o cardápio de novo
-      // mais tarde na mesma conversa (pra conferir algo, trocar item) não
-      // precisa ver o vídeo de novo — vira spam.
-      if (mostrouCardapio && !rascunho?.video_buffet_enviado) {
-        try {
-          const video = await buscarVideoBuffet();
-          if (video) {
-            await enviarMidia(telefone, video.url, {
-              tipo: video.tipo,
-              legenda: '🍽️ Esse é o nosso buffet de hoje!',
-            });
-            await stamparRascunho(telefone, { video_buffet_enviado: true }).catch(() => {});
-            logger.info('buffet/video-enviado', 'Vídeo do buffet enviado', { requestId, telefone, tipo: video.tipo });
-          } else {
-            logger.info('buffet/sem-video', 'Nenhum vídeo de buffet para hoje', { requestId, telefone });
-          }
-        } catch (err) {
-          // Vídeo é um extra. Se falhar, o cardápio em texto ainda vai — não
-          // faz sentido derrubar o atendimento por causa disso.
-          logger.warn('buffet/video-falhou', err.message, { requestId, telefone });
-        }
-      }
+      // O vídeo do buffet NÃO é mais enviado pro cliente. O upload continua no
+      // painel (a equipe usa em outros canais), mas no WhatsApp ele saía junto
+      // do cardápio em toda conversa e virava peso na conversa — o cardápio em
+      // texto já responde o que a pessoa perguntou.
 
       if (!texto) {
         // Resposta vazia é sintoma de algo errado (raciocínio consumiu todo o
