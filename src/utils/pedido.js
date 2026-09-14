@@ -30,20 +30,39 @@ function avaliarRascunho(r = {}) {
   const itens = parseItens(r.itens);
   const faltando = [];
 
-  if (!itens.length)                                    faltando.push('itens');
-  if (!r.nome_cliente)                                  faltando.push('nome');
-  if (!r.tipo_entrega)                                  faltando.push('tipo_entrega');
-  if (r.tipo_entrega === 'delivery' && !r.endereco)     faltando.push('endereco');
-  if (!r.forma_pagamento)                               faltando.push('forma_pagamento');
-  // Dinheiro sem troco definido é pedido incompleto: o entregador sai sem
-  // saber quanto levar e a conta acontece na porta do cliente. Zero é uma
-  // resposta válida ("tenho o valor certo") — por isso o teste é != null.
-  if (r.forma_pagamento === 'dinheiro' && r.troco_para == null) faltando.push('troco');
+  const ehDelivery = r.tipo_entrega === 'delivery';
+
+  if (!itens.length)                        faltando.push('itens');
+  if (!r.nome_cliente)                      faltando.push('nome');
+  if (!r.tipo_entrega)                      faltando.push('tipo_entrega');
+  if (ehDelivery && !r.endereco)            faltando.push('endereco');
+
+  // Pagamento só é obrigatório no DELIVERY. Na retirada o cliente paga no
+  // balcão, olho no olho — perguntar a forma aqui é uma pergunta a mais numa
+  // conversa que os clientes já acham longa, e a resposta não muda nada pra
+  // cozinha. Se ele disser por conta própria ("vou pagar no pix"), o sistema
+  // aceita e registra; só não cobra.
+  if (ehDelivery && !r.forma_pagamento)     faltando.push('forma_pagamento');
+
   // Delivery sem taxa calculada não fecha: o total sairia errado. A taxa é
   // calculada à mão no painel, então este é o único item da lista que NÃO
   // depende do cliente responder nada — depende da equipe digitar o valor
   // (ou dos 5 minutos de espera estourarem e o padrão entrar).
-  if (r.tipo_entrega === 'delivery' && r.taxa_entrega == null) faltando.push('taxa_entrega');
+  if (ehDelivery && r.taxa_entrega == null) faltando.push('taxa_entrega');
+
+  // TROCO POR ÚLTIMO, e só quando já dá pra saber o total.
+  // Numa conversa real o agente perguntou "precisa de troco pra quanto?" CINCO
+  // vezes seguidas, antes de a entrega ter sido calculada — a cliente não tinha
+  // como responder, porque nem ela nem o agente sabiam quanto tinha dado. Ela
+  // respondia outra coisa, a pergunta voltava, e virou a reclamação de "muita
+  // pergunta". Zero continua sendo resposta válida ("tenho o valor certo"),
+  // por isso o teste é != null.
+  // E só no DELIVERY: o troco existe porque o entregador precisa sair com
+  // dinheiro na mão. Na retirada tem caixa no balcão, e a pergunta não serve
+  // pra nada além de alongar a conversa.
+  if (ehDelivery && r.forma_pagamento === 'dinheiro' && r.taxa_entrega != null && r.troco_para == null) {
+    faltando.push('troco');
+  }
 
   const completo = faltando.length === 0;
 
@@ -166,7 +185,13 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   linhas.push(tipoEntrega === 'delivery'
     ? `📍 Entrega: ${endereco}`
     : '📍 Retirada no local');
-  linhas.push(`💳 Pagamento: ${rotuloPagamento(formaPagamento)}`);
+  // Na retirada a forma de pagamento deixou de ser perguntada — quem não
+  // informou nada paga no balcão, e o resumo diz isso em vez de mostrar "—".
+  linhas.push(`💳 Pagamento: ${
+    !formaPagamento && tipoEntrega === 'retirada'
+      ? 'na retirada, no balcão'
+      : rotuloPagamento(formaPagamento)
+  }`);
   linhas.push('');
   linhas.push(`🛍️ Subtotal: ${fmtBRL(totais.subtotal)}`);
   // Em delivery a linha da taxa aparece SEMPRE, mesmo que seja zero: o cliente
