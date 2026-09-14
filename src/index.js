@@ -292,7 +292,7 @@ app.post('/webhook', async (req, res) => {
 // Áudio, imagem e localização NÃO esperam: cada um tem tratamento próprio
 // (transcrever, ler comprovante) e juntar mudaria o significado. Eles descarregam
 // o que estiver acumulado e seguem na frente.
-// 12 segundos de silêncio antes de responder. Parece muito, mas o cliente
+// 8 segundos de silêncio antes de responder. O cliente
 // digitando não sente: o relógio REINICIA a cada mensagem nova, então ele só
 // espera depois de parar de escrever de verdade.
 //
@@ -300,7 +300,7 @@ app.post('/webhook', async (req, res) => {
 // "Média" / "Arroz, feijão, batata frita" / "frango assado" — e responder no
 // meio da rajada fazia o agente trabalhar com metade do pedido e perguntar o
 // que a pessoa já estava escrevendo na linha seguinte.
-const ESPERA_AGRUPAR_MS = Number(process.env.AGRUPAR_MSG_SEG || 12) * 1000;
+const ESPERA_AGRUPAR_MS = Number(process.env.AGRUPAR_MSG_SEG || 8) * 1000;
 
 // Teto: quem escreve sem parar não pode adiar a resposta pra sempre.
 const TETO_AGRUPAR_MS = Number(process.env.TETO_AGRUPAR_SEG || 40) * 1000;
@@ -845,8 +845,12 @@ async function processarMensagem(msg, requestId) {
 //     de sobra pra pessoa pedir em outro lugar.
 //   - Ainda só olhando cardápio → 8 min, pra não parecer insistente com quem
 //     nem decidiu se vai pedir.
-const SILENCIO_QUENTE_MS = 3 * 60_000;
-const SILENCIO_FRIO_MS   = 8 * 60_000;
+// Eram 3 e 8 minutos, e ficou curto demais. Escolher carne e acompanhamento
+// no meio do expediente leva vários minutos — a pessoa não está desistindo,
+// está lendo o cardápio. Cutucar nesse intervalo faz o agente parecer que
+// perguntou duas vezes, que foi a reclamação real de uma cliente.
+const SILENCIO_QUENTE_MS = Number(process.env.SILENCIO_QUENTE_MIN || 10) * 60_000;
+const SILENCIO_FRIO_MS   = Number(process.env.SILENCIO_FRIO_MIN || 20) * 60_000;
 const TRAVADO_WATCHDOG_MS = 2 * 60_000;
 
 // Etapas em que o cliente já demonstrou intenção real de compra.
@@ -924,9 +928,36 @@ async function pollarFollowups() {
         logger.info('followup/pausado', 'Atendimento pausado, follow-up não enviado', { requestId, telefone });
         continue;
       }
+
+      // O cliente pode estar escrevendo AGORA: a mensagem dele já chegou e
+      // está na janela de agrupamento, esperando os segundos de silêncio.
+      // Mandar follow-up em cima disso é falar por cima da resposta dele.
+      if (buffers.has(telefone)) {
+        logger.info('followup/cliente-escrevendo', 'Mensagem do cliente em andamento, follow-up cancelado', { requestId, telefone });
+        await salvarRascunho(telefone, { followup_enviado: false }).catch(() => {});
+        continue;
+      }
+
       const historico = await carregarHistorico(telefone);
       const texto = await gerarFollowup(historico, rascunho, requestId, telefone);
       if (!texto) continue;
+
+      // Entre reivindicar o follow-up e gerar o texto passam alguns segundos
+      // (é uma chamada ao modelo). Nesse intervalo o cliente pode ter
+      // respondido — foi o que aconteceu com a Jessica: ela respondeu "Filé de
+      // frango e carne de panela" e recebeu, no mesmo minuto, um "quais carnes
+      // você prefere?". Parecia que o agente tinha perguntado duas vezes.
+      const agora = await carregarRascunho(telefone).catch(() => null);
+      const clienteFalou = agora && (
+        agora.ultima_msg_role === 'user' ||
+        new Date(agora.ultima_msg_em).getTime() > new Date(rascunho.ultima_msg_em).getTime()
+      );
+      if (clienteFalou) {
+        logger.info('followup/cliente-respondeu', 'Cliente respondeu enquanto o follow-up era gerado — descartado', { requestId, telefone });
+        await salvarRascunho(telefone, { followup_enviado: false }).catch(() => {});
+        continue;
+      }
+
       await responder(telefone, texto, { requestId, etapa: 'followup' });
       logger.info('followup/enviado', 'Follow-up enviado após silêncio', { requestId, telefone });
     } catch (err) {
