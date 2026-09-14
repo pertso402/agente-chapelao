@@ -40,7 +40,10 @@ require.cache[caminhoDb] = {
   exports: {
     buscarProdutos: async () => PRODUTOS,
     buscarItensDoDia: async () => ITENS_DO_DIA,
-    buscarCombos: async () => [],
+    buscarCombos: async () => ([
+      { slug: 'almoco_resolvido', nome: 'Almoço Resolvido', preco: 29.9, subsidio_frete_max: 6,
+        itens: [{ quantidade: 1, rotulo: 'Grande' }, { quantidade: 1, rotulo: 'sobremesa' }] },
+    ]),
     buscarComboPorId: async () => null,
     precoFinal: (p) => Number(p.preco),
     buscarInfo: async () => ({ nome: 'Chapelão', chave_pix: '000', horario: 'Seg a Sáb' }),
@@ -117,6 +120,22 @@ async function teste(nome, fn) {
   await teste('cardápio do dia sai sem quebrar', async () => {
     const r = await executarTool('buscar_itens_do_dia', {}, { telefone: '5544999' });
     assert.ok(r.includes('Frango assado'), 'não trouxe as carnes do dia');
+  });
+
+  await teste('o cardápio NÃO promete entrega grátis no combo', async () => {
+    // O combo cobre ATÉ um teto (R$ 6 no Almoço Resolvido). A mensagem dizia
+    // "Combos — a entrega é por nossa conta", e o cliente lia frete grátis:
+    // com entrega de R$ 14 ele ainda paga R$ 8. Prometer o que o sistema não
+    // cumpre é o pior defeito que este atendimento pode ter.
+    const r = await executarTool('buscar_itens_do_dia', {}, { telefone: '5544999' });
+    const proCliente = r.split('[INSTRUÇÃO INTERNA')[0];
+
+    assert.ok(!/a entrega é por nossa conta/i.test(proCliente),
+      'voltou a prometer entrega por nossa conta sem dizer o teto');
+    assert.ok(!/frete gr[áa]tis|entrega gr[áa]tis/i.test(proCliente),
+      'apareceu "grátis" na mensagem do cardápio');
+    assert.ok(/at[ée] R\$ ?6/.test(proCliente),
+      `o teto do subsídio tem que aparecer junto do combo:\n${proCliente}`);
   });
 
   console.log(`\n${process.exitCode ? '❌ FALHOU' : `✅ ${passou} testes passaram`}\n`);

@@ -216,14 +216,22 @@ async function executarTool(nome, args, contexto = {}) {
       // o cardápio primeiro e o combo depois transforma o combo em "empurrão de
       // venda", que é justamente o que faz o cliente travar na avulsa.
       const emoji = { almoco_resolvido: '🍱', almoco_de_dois: '🍱🍱', mesa_cheia: '🍱🍱🍱' };
+      // ⚠️ O texto do combo NÃO pode dizer "entrega por nossa conta" seco: o
+      // combo cobre até um TETO (R$ 6 no Almoço Resolvido), e a entrega daqui
+      // passa disso com facilidade. Prometer entrega grátis e depois cobrar a
+      // diferença é a pior coisa que este sistema pode fazer — o cliente lê
+      // "grátis" no cardápio e descobre o contrário no resumo.
       const linhasCombo = combos.length
-        ? '\n\n🔥 *Combos — a entrega é por nossa conta:*\n' + combos.map(c => {
+        ? '\n\n🔥 *Combos — a gente ajuda na entrega:*\n' + combos.map(c => {
             // Rótulo de cliente, nunca o nome interno do produto: "Grande + sobremesa
             // + Coca mini" e não "Marmitex Grande + Sobremesa 75ml + Refrigerante 200ml Pet".
             const desc = c.itens
               .map(i => `${i.quantidade > 1 ? `${i.quantidade} ` : ''}${i.rotulo}`)
               .join(' + ');
-            return `${emoji[c.slug] || '🍱'} *${c.nome}* — ${desc} — ${fmtBRL(c.preco)}`;
+            const ajuda = Number(c.subsidio_frete_max) > 0
+              ? ` _(+ até ${fmtBRL(c.subsidio_frete_max)} da entrega por nossa conta)_`
+              : '';
+            return `${emoji[c.slug] || '🍱'} *${c.nome}* — ${desc} — ${fmtBRL(c.preco)}${ajuda}`;
           }).join('\n')
         : '';
 
