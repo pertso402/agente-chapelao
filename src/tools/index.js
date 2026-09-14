@@ -3,6 +3,7 @@
 const db = require('../services/supabase');
 const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcularSubtotal, normalizar } = require('../utils/pedido');
 const { PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
+const { normalizarTipoEntrega, normalizarFormaPagamento } = require('../utils/intencao');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = { 'marmitex': 0, 'combos': 1, 'combo': 1, 'maioneses': 8, 'bebidas': 9 };
@@ -286,9 +287,20 @@ async function executarTool(nome, args, contexto = {}) {
       if (args.nome_cliente)    campos.nome_cliente    = args.nome_cliente;
       if (args.itens)           campos.itens           = args.itens;
       if (args.itens_brinde)    campos.itens_brinde    = args.itens_brinde;
-      if (args.tipo_entrega)    campos.tipo_entrega    = args.tipo_entrega;
+      // A tool declara enum em inglês ('delivery'), mas o modelo conversa em
+      // português e às vezes manda "entrega" — que entrava cru no banco e
+      // quebrava tudo que compara com 'delivery' (taxa, resumo, total).
+      if (args.tipo_entrega) {
+        const tipo = normalizarTipoEntrega(args.tipo_entrega);
+        if (tipo) campos.tipo_entrega = tipo;
+        else avisosExtras.push(`Não entendi "${args.tipo_entrega}" como tipo de entrega. Pergunte ao cliente se é entrega ou retirada.`);
+      }
       if (args.endereco)        campos.endereco        = args.endereco;
-      if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
+      if (args.forma_pagamento) {
+        const forma = normalizarFormaPagamento(args.forma_pagamento);
+        if (forma) campos.forma_pagamento = forma;
+        else avisosExtras.push(`Não entendi "${args.forma_pagamento}" como forma de pagamento. Pergunte se é PIX, dinheiro ou cartão.`);
+      }
       if (args.observacao_geral) campos.observacao = args.observacao_geral;
       // troco 0 é resposta válida ("tenho o valor certo") — por isso o teste é
       // contra null/undefined, não contra "valor falsy".
@@ -348,7 +360,8 @@ async function executarTool(nome, args, contexto = {}) {
           : (Number(rascunho.troco_para) === 0 ? 'não precisa de troco' : fmtBRL(rascunho.troco_para)),
       };
 
-      if (avisos?.length) resumo.AVISOS = avisos;
+      const todosAvisos = [...(avisos || []), ...avisosExtras];
+      if (todosAvisos.length) resumo.AVISOS = todosAvisos;
 
       if (comboAtivo) {
         resumo.combo = `${comboAtivo.nome} — ${fmtBRL(comboAtivo.preco)} (entrega por nossa conta até ${fmtBRL(comboAtivo.subsidio_frete_max)})`;

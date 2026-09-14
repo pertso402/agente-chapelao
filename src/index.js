@@ -23,7 +23,8 @@ const {
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, relatorioDeConsumo } = require('./agent');
 const { comRetry } = require('./utils/retry');
-const { normalizar, montarResumoFinal, descreverFaltando } = require('./utils/pedido');
+const { normalizar, montarResumoFinal, descreverFaltando, avaliarRascunho } = require('./utils/pedido');
+const { capturarRespostaObvia } = require('./utils/intencao');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
   TAXA_ENTREGA_PADRAO, TIMEOUT_TAXA_MS,
@@ -77,6 +78,10 @@ async function escalarParaAtendente(telefone, motivo, requestId, { mensagemClien
     await responder(telefone, mensagemCliente, { requestId, etapa: 'escalarAtendente' }).catch(() => {});
   }
 }
+
+// Quantas mensagens seguidas o pedido pode ficar parado no mesmo campo antes
+// de o sistema desistir de perguntar e chamar uma pessoa.
+const LIMITE_REPETICAO = Number(process.env.LIMITE_REPETICAO || 3);
 
 const MSG_ATENDENTE_PADRAO =
   'Opa, deixa eu chamar alguém da equipe pra te ajudar com isso 🙋 Um atendente assume nossa conversa em instantes, tá? 🎩';
@@ -464,7 +469,7 @@ async function processarMensagem(msg, requestId) {
     }).catch(err => logger.warn('rascunho/stamp-user-falhou', err.message, { requestId, telefone }));
 
     // ── Estado ──────────────────────────────────────────────────────────────
-    const [historico, rascunho, ofertaAtiva] = await Promise.all([
+    const [historico, rascunhoCru, ofertaAtiva] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
       carregarRascunho(telefone),
       buscarCupomAtivoPorTelefone(telefone).catch((e) => {
@@ -474,6 +479,60 @@ async function processarMensagem(msg, requestId) {
         return null;
       }),
     ]);
+    // ── A resposta óbvia é gravada pelo CÓDIGO, não pela LLM ─────────────────
+    // A cliente respondeu "Entrega" três vezes, o agente perguntou três vezes,
+    // e tipo_entrega ficou NULL no banco o tempo todo: a LLM leu, seguiu a
+    // conversa e não chamou a tool pra gravar. Resposta de uma palavra é coisa
+    // demais pra depender de o modelo lembrar — aqui o código lê e grava,
+    // igual já fazia com o "sim" da confirmação.
+    let rascunho = rascunhoCru;
+    if (rascunho) {
+      const faltavam = avaliarRascunho(rascunho).faltando;
+      const capturado = capturarRespostaObvia(faltavam, conteudo);
+
+      if (Object.keys(capturado).length) {
+        logger.info('estado/resposta-capturada', 'Resposta do cliente gravada pelo código', {
+          requestId, telefone, campos: capturado,
+        });
+        rascunho = (await atualizarRascunho(telefone, capturado).catch(err => {
+          logger.warn('estado/captura-falhou', err.message, { requestId, telefone });
+          return null;
+        }))?.rascunho || rascunho;
+      }
+    }
+
+    // ── Travar a repetição ───────────────────────────────────────────────────
+    // Se o pedido continua parado no MESMO campo depois de várias mensagens,
+    // o agente está perguntando e não está conseguindo registrar. Insistir daí
+    // pra frente só irrita — foi assim que a cliente desistiu ("você faz as
+    // mesmas perguntas e não finaliza"). Melhor entregar pra uma pessoa.
+    if (rascunho) {
+      const av = avaliarRascunho(rascunho);
+      const alvo = av.faltando[0] || null;
+
+      if (alvo) {
+        const repetiu = rascunho.ultimo_faltando === alvo;
+        const vezes = repetiu ? (Number(rascunho.faltando_vezes) || 0) + 1 : 1;
+        await stamparRascunho(telefone, { ultimo_faltando: alvo, faltando_vezes: vezes })
+          .catch(() => {});
+
+        if (vezes >= LIMITE_REPETICAO) {
+          logger.warn('atendimento/em-loop', 'Mesmo campo pendente por várias mensagens seguidas', {
+            requestId, telefone, campo: alvo, vezes,
+          });
+          await escalarParaAtendente(
+            telefone,
+            `🔁 [TRAVADO] O pedido está parado há ${vezes} mensagens no mesmo ponto: falta ${descreverFaltando([alvo])}. O cliente já respondeu e o sistema não conseguiu registrar — feche o pedido manualmente pelo painel.`,
+            requestId,
+            { mensagemCliente: 'Perdão pela repetição! 🙏 Vou passar pra alguém da equipe finalizar seu pedido agora mesmo.' },
+          );
+          return;
+        }
+      } else if (rascunho.ultimo_faltando) {
+        await stamparRascunho(telefone, { ultimo_faltando: null, faltando_vezes: 0 }).catch(() => {});
+      }
+    }
+
     logger.info('estado/ok', 'Estado carregado', {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
       cupom_ativo: ofertaAtiva?.codigo || null,
