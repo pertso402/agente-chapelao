@@ -292,8 +292,18 @@ app.post('/webhook', async (req, res) => {
 // Áudio, imagem e localização NÃO esperam: cada um tem tratamento próprio
 // (transcrever, ler comprovante) e juntar mudaria o significado. Eles descarregam
 // o que estiver acumulado e seguem na frente.
-const ESPERA_AGRUPAR_MS = Number(process.env.AGRUPAR_MSG_SEG || 6) * 1000;
-const TETO_AGRUPAR_MS = ESPERA_AGRUPAR_MS * 4;
+// 12 segundos de silêncio antes de responder. Parece muito, mas o cliente
+// digitando não sente: o relógio REINICIA a cada mensagem nova, então ele só
+// espera depois de parar de escrever de verdade.
+//
+// Era 6s e ficou curto. O jeito como as pessoas pedem aqui é em pedaço —
+// "Média" / "Arroz, feijão, batata frita" / "frango assado" — e responder no
+// meio da rajada fazia o agente trabalhar com metade do pedido e perguntar o
+// que a pessoa já estava escrevendo na linha seguinte.
+const ESPERA_AGRUPAR_MS = Number(process.env.AGRUPAR_MSG_SEG || 12) * 1000;
+
+// Teto: quem escreve sem parar não pode adiar a resposta pra sempre.
+const TETO_AGRUPAR_MS = Number(process.env.TETO_AGRUPAR_SEG || 40) * 1000;
 
 const buffers = new Map(); // telefone -> { msgs, timer, requestId, desde }
 
@@ -501,35 +511,29 @@ async function processarMensagem(msg, requestId) {
       }
     }
 
-    // ── Travar a repetição ───────────────────────────────────────────────────
-    // Se o pedido continua parado no MESMO campo depois de várias mensagens,
-    // o agente está perguntando e não está conseguindo registrar. Insistir daí
-    // pra frente só irrita — foi assim que a cliente desistiu ("você faz as
-    // mesmas perguntas e não finaliza"). Melhor entregar pra uma pessoa.
+    // ── Sinal de repetição (só avisa, NÃO interrompe o atendimento) ──────────
+    // Este contador já chegou a chamar atendente sozinho quando o mesmo campo
+    // ficava pendente 3 mensagens seguidas. Só que "falta itens" fica pendente
+    // nas primeiras mensagens de QUALQUER conversa ("oi", "bom dia", "vocês
+    // estão abertos?") — e o agente passou a entregar pra humano conversas
+    // perfeitamente normais. O remédio era pior que a doença.
+    //
+    // Agora o contador só registra. Quem resolve a repetição de verdade é a
+    // captura determinística logo acima, que grava a resposta do cliente sem
+    // depender da LLM lembrar de chamar a tool.
     if (rascunho) {
-      const av = avaliarRascunho(rascunho);
-      const alvo = av.faltando[0] || null;
+      const alvo = avaliarRascunho(rascunho).faltando[0] || null;
+      const vezes = rascunho.ultimo_faltando === alvo ? (Number(rascunho.faltando_vezes) || 0) + 1 : 1;
 
-      if (alvo) {
-        const repetiu = rascunho.ultimo_faltando === alvo;
-        const vezes = repetiu ? (Number(rascunho.faltando_vezes) || 0) + 1 : 1;
-        await stamparRascunho(telefone, { ultimo_faltando: alvo, faltando_vezes: vezes })
-          .catch(() => {});
+      await stamparRascunho(telefone, {
+        ultimo_faltando: alvo,
+        faltando_vezes: alvo ? vezes : 0,
+      }).catch(() => {});
 
-        if (vezes >= LIMITE_REPETICAO) {
-          logger.warn('atendimento/em-loop', 'Mesmo campo pendente por várias mensagens seguidas', {
-            requestId, telefone, campo: alvo, vezes,
-          });
-          await escalarParaAtendente(
-            telefone,
-            `🔁 [TRAVADO] O pedido está parado há ${vezes} mensagens no mesmo ponto: falta ${descreverFaltando([alvo])}. O cliente já respondeu e o sistema não conseguiu registrar — feche o pedido manualmente pelo painel.`,
-            requestId,
-            { mensagemCliente: 'Perdão pela repetição! 🙏 Vou passar pra alguém da equipe finalizar seu pedido agora mesmo.' },
-          );
-          return;
-        }
-      } else if (rascunho.ultimo_faltando) {
-        await stamparRascunho(telefone, { ultimo_faltando: null, faltando_vezes: 0 }).catch(() => {});
+      if (alvo && vezes >= LIMITE_REPETICAO) {
+        logger.warn('atendimento/em-loop', 'Mesmo campo pendente por várias mensagens seguidas', {
+          requestId, telefone, campo: alvo, vezes,
+        });
       }
     }
 

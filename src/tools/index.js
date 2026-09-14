@@ -284,6 +284,9 @@ async function executarTool(nome, args, contexto = {}) {
       if (!telefone) return 'ERRO: telefone não disponível no contexto.';
 
       const campos = {};
+      // Avisos gerados aqui (valor que não deu pra entender) e entregues à LLM
+      // junto dos avisos da validação de itens, mais abaixo.
+      const avisosExtras = [];
       if (args.nome_cliente)    campos.nome_cliente    = args.nome_cliente;
       if (args.itens)           campos.itens           = args.itens;
       if (args.itens_brinde)    campos.itens_brinde    = args.itens_brinde;
