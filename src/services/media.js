@@ -204,7 +204,21 @@ const MIN_CARACTERES_PDF = 20;
 async function extrairTextoDoPdf(base64) {
   // Carregado sob demanda: quem não recebe PDF nunca paga o custo de subir a
   // biblioteca, e uma falha dela não derruba o resto da mídia.
-  const { PDFParse } = require('pdf-parse');
+  //
+  // A lib traz um binário nativo (@napi-rs/canvas) e o container é Alpine
+  // (musl). Se esse binário não subir, a leitura de PDF simplesmente não
+  // acontece e o agente volta a pedir a foto — o comportamento de antes desta
+  // mudança. Por isso a falha de carga é tratada como "não deu pra ler", e não
+  // como erro técnico: pior cenário do deploy é ficar como estava.
+  let PDFParse;
+  try {
+    ({ PDFParse } = require('pdf-parse'));
+  } catch (err) {
+    const e = new Error(`Biblioteca de PDF indisponível no ambiente: ${err.message}`);
+    e.semTexto = true;
+    e.bibliotecaIndisponivel = true;
+    throw e;
+  }
 
   const parser = new PDFParse({ data: Buffer.from(base64, 'base64') });
   try {
@@ -222,6 +236,7 @@ async function analisarPdf(base64) {
   try {
     texto = await extrairTextoDoPdf(base64);
   } catch (err) {
+    if (err.semTexto) throw err;   // já classificado (biblioteca fora do ar)
     const e = new Error(`PDF ilegível: ${err.message}`);
     e.semTexto = true;
     throw e;
