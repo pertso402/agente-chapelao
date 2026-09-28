@@ -853,8 +853,20 @@ const SILENCIO_QUENTE_MS = Number(process.env.SILENCIO_QUENTE_MIN || 10) * 60_00
 const SILENCIO_FRIO_MS   = Number(process.env.SILENCIO_FRIO_MIN || 20) * 60_000;
 const TRAVADO_WATCHDOG_MS = 2 * 60_000;
 
+// O resumo já foi mostrado e só falta o cliente dizer SIM: aqui a espera é
+// curta de propósito. Ele não está mais lendo cardápio nem decidindo — muitas
+// vezes só não percebeu que precisava responder. Dez minutos nessa etapa é
+// pedido esfriando por falta de uma frase.
+const ESPERA_SIM_MS = Number(process.env.ESPERA_SIM_MIN || 2) * 60_000;
+
 // Etapas em que o cliente já demonstrou intenção real de compra.
 const ETAPAS_QUENTES = new Set(['coletando_dados', 'aguardando_confirmacao']);
+
+// Quanto tempo de silêncio cada etapa aguenta antes do follow-up.
+function limiteDeSilencio(etapa) {
+  if (etapa === 'aguardando_confirmacao') return ESPERA_SIM_MS;
+  return ETAPAS_QUENTES.has(etapa) ? SILENCIO_QUENTE_MS : SILENCIO_FRIO_MS;
+}
 
 // ─── ABERTURA E FECHAMENTO AUTOMÁTICOS ────────────────────────────────────────
 // O botão do painel é a chave mestra; esta rotina só o gira nos horários.
@@ -911,9 +923,13 @@ async function pollarFollowups() {
 
   // Reivindica pela janela mais larga e filtra aqui: o banco não sabe a regra
   // de temperatura, e uma query só evita duas rodadas de claim concorrentes.
-  const candidatos = (await reivindicarFollowups(SILENCIO_QUENTE_MS)).filter(r => {
+  // A reivindicação usa a MENOR das janelas: quem espera o SIM é cutucado em 2
+  // minutos, e o banco não sabe dessa regra. Reivindicar só pela janela quente
+  // deixaria esses rascunhos invisíveis até os 10 minutos.
+  const janelaDeBusca = Math.min(SILENCIO_QUENTE_MS, ESPERA_SIM_MS);
+  const candidatos = (await reivindicarFollowups(janelaDeBusca)).filter(r => {
     const silencioMs = Date.now() - new Date(r.ultima_msg_em).getTime();
-    const limite = ETAPAS_QUENTES.has(r.etapa_atual) ? SILENCIO_QUENTE_MS : SILENCIO_FRIO_MS;
+    const limite = limiteDeSilencio(r.etapa_atual);
     if (silencioMs >= limite) return true;
     // Ainda não é hora: devolve pra fila pra ser pego no ciclo certo.
     salvarRascunho(r.telefone, { followup_enviado: false }).catch(() => {});
@@ -938,8 +954,16 @@ async function pollarFollowups() {
         continue;
       }
 
-      const historico = await carregarHistorico(telefone);
-      const texto = await gerarFollowup(historico, rascunho, requestId, telefone);
+      // Esperando o SIM: texto fixo, sem passar pelo modelo. O follow-up
+      // genérico é instruído a "não soar como cobrança" e sai vago — exatamente
+      // o contrário do que esta etapa precisa. Aqui só falta uma palavra, e ela
+      // tem que ser dita com todas as letras. De quebra, não gasta token.
+      const esperandoSim = rascunho.etapa_atual === 'aguardando_confirmacao';
+      const primeiroNome = String(rascunho.nome_cliente || '').trim().split(/\s+/)[0];
+
+      const texto = esperandoSim
+        ? `${primeiroNome ? `${primeiroNome}, ` : ''}só falta você me responder *SIM* que eu mando seu pedido pra cozinha 👨‍🍳`
+        : await gerarFollowup(await carregarHistorico(telefone), rascunho, requestId, telefone);
       if (!texto) continue;
 
       // Entre reivindicar o follow-up e gerar o texto passam alguns segundos
