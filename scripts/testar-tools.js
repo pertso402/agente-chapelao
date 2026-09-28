@@ -29,6 +29,21 @@ const PRODUTOS = [
   { id: 'md', nome: 'Marmitex Média', categoria: 'Marmitex', preco: 21, disponivel: true },
   { id: 'gr', nome: 'Marmitex Grande', categoria: 'Marmitex', preco: 23, disponivel: true },
   { id: 'coca', nome: 'Coca-Cola Lata 350ml', categoria: 'Bebidas', preco: 7, disponivel: true },
+  { id: 'sob', nome: 'Sobremesa 75ml', categoria: 'Doces', preco: 4, disponivel: true },
+  { id: 'ref', nome: 'Refrigerante 200ml Pet', categoria: 'Bebidas', preco: 5, disponivel: true },
+];
+
+// Composição real do combo que deu problema em produção: a LLM mandava só a
+// marmita e o combo era descartado no fechamento, cobrando os itens avulsos.
+const COMBOS = [
+  {
+    id: 'c1', slug: 'almoco_resolvido', nome: 'Almoço Resolvido', preco: 29.9, subsidio_frete_max: 6,
+    itens: [
+      { produto_id: 'gr',  nome: 'Marmitex Grande',        rotulo: 'Marmitex Grande', quantidade: 1, papel: 'marmita' },
+      { produto_id: 'sob', nome: 'Sobremesa 75ml',         rotulo: 'sobremesa',       quantidade: 1, papel: 'sobremesa' },
+      { produto_id: 'ref', nome: 'Refrigerante 200ml Pet', rotulo: 'refrigerante',    quantidade: 1, papel: 'bebida' },
+    ],
+  },
 ];
 
 // Banco falso: devolve o mínimo que cada tool espera.
@@ -40,11 +55,14 @@ require.cache[caminhoDb] = {
   exports: {
     buscarProdutos: async () => PRODUTOS,
     buscarItensDoDia: async () => ITENS_DO_DIA,
-    buscarCombos: async () => ([
-      { slug: 'almoco_resolvido', nome: 'Almoço Resolvido', preco: 29.9, subsidio_frete_max: 6,
-        itens: [{ quantidade: 1, rotulo: 'Grande' }, { quantidade: 1, rotulo: 'sobremesa' }] },
-    ]),
-    buscarComboPorId: async () => null,
+    buscarCombos: async () => COMBOS,
+    buscarComboPorId: async (id) => COMBOS.find(c => c.id === id) || null,
+    // Mesma regra do banco: o preço fechado só vale na combinação exata.
+    conferirComposicaoDoCombo: (combo, itens) => {
+      const esperado = combo.itens.map(p => `${p.quantidade}x ${p.nome}`).sort().join('|');
+      const recebido = (itens || []).map(i => `${i.quantidade}x ${i.nome}`).sort().join('|');
+      return esperado === recebido;
+    },
     precoFinal: (p) => Number(p.preco),
     buscarInfo: async () => ({ nome: 'Chapelão', chave_pix: '000', horario: 'Seg a Sáb' }),
     carregarRascunho: async () => rascunho,
@@ -136,6 +154,36 @@ async function teste(nome, fn) {
       'apareceu "grátis" na mensagem do cardápio');
     assert.ok(/at[ée] R\$ ?6/.test(proCliente),
       `o teto do subsídio tem que aparecer junto do combo:\n${proCliente}`);
+  });
+
+  await teste('COMBO: o sistema completa a composição que a LLM esqueceu', async () => {
+    // Bug real, 10 pedidos em 30 dias: a LLM marcava o combo e mandava só a
+    // marmita. O fechamento via que os itens não batiam, descartava o combo em
+    // silêncio e o cliente pagava os itens avulsos — mais caro do que aceitou.
+    rascunho.itens = '[]'; rascunho.combo_id = null;
+    await executarTool('salvar_dados_pedido', {
+      combo: 'Almoço Resolvido',
+      itens: [{ nome: 'Marmitex Grande', quantidade: 1 }],
+    }, { telefone: '5544999' });
+
+    const gravados = JSON.parse(typeof rascunho.itens === 'string' ? rascunho.itens : JSON.stringify(rascunho.itens));
+    const nomes = gravados.map(i => i.nome).sort();
+    assert.deepEqual(nomes, ['Marmitex Grande', 'Refrigerante 200ml Pet', 'Sobremesa 75ml'],
+      `o combo tinha que ter sido completado, veio: ${nomes.join(', ')}`);
+  });
+
+  await teste('COMBO: item fora da composição vira aviso, não surpresa no total', async () => {
+    rascunho.itens = '[]'; rascunho.combo_id = null;
+    const r = await executarTool('salvar_dados_pedido', {
+      combo: 'Almoço Resolvido',
+      itens: [
+        { nome: 'Marmitex Grande', quantidade: 1 },
+        { nome: 'Coca-Cola Lata 350ml', quantidade: 1 },
+      ],
+    }, { telefone: '5544999' });
+
+    assert.ok(/não faz parte|NÃO vai ser aplicado/i.test(r),
+      `o agente precisa ser avisado de que o pedido saiu do combo:\n${r.slice(0, 300)}`);
   });
 
   console.log(`\n${process.exitCode ? '❌ FALHOU' : `✅ ${passou} testes passaram`}\n`);

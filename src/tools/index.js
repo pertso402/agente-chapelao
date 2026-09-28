@@ -5,6 +5,51 @@ const { descreverFaltando, parseItens, montarResumoFinal, avaliarRascunho, calcu
 const { PAUSA_ATENDENTE_MS, fmtBRL } = require('../config');
 const { normalizarTipoEntrega, normalizarFormaPagamento } = require('../utils/intencao');
 
+// ─── COMPOSIÇÃO DO COMBO ──────────────────────────────────────────────────────
+// Quem monta o combo é o SISTEMA, não a LLM. Antes, ela precisava enumerar a
+// marmita + a sobremesa + a bebida por conta própria; quando esquecia alguma
+// (10 pedidos em 30 dias), a conferência no fechamento descartava o combo em
+// silêncio e o cliente pagava os itens avulsos — MAIS CARO do que ele aceitou,
+// sem ninguém avisar. Um deles reclamou exatamente disso: pediu o "Almoço
+// Resolvido" e foi cobrado sem os itens do combo.
+//
+// Devolve a lista completa e os avisos do que foi ajustado, pro agente poder
+// contar ao cliente em vez de mudar o pedido pelas costas dele.
+function completarItensDoCombo(combo, itensInformados) {
+  const itens = (Array.isArray(itensInformados) ? itensInformados : []).map(i => ({ ...i }));
+  const avisos = [];
+
+  for (const parte of combo.itens) {
+    const alvo = normalizar(parte.nome);
+    const jaTem = itens.find(i => normalizar(i.nome) === alvo);
+
+    if (!jaTem) {
+      itens.push({ nome: parte.nome, quantidade: parte.quantidade });
+      avisos.push(`Incluí ${parte.quantidade}x ${parte.rotulo}: faz parte do ${combo.nome}.`);
+      continue;
+    }
+    if (Number(jaTem.quantidade) !== parte.quantidade) {
+      jaTem.quantidade = parte.quantidade;
+      avisos.push(`Ajustei ${parte.rotulo} para ${parte.quantidade}: é o que o ${combo.nome} inclui.`);
+    }
+  }
+
+  // Item fora da composição mantém o pedido fora do combo — o preço fechado só
+  // vale para a combinação exata. Em vez de descobrir isso no fechamento, o
+  // agente fica sabendo agora e pode oferecer a escolha ao cliente.
+  const daComposicao = new Set(combo.itens.map(p => normalizar(p.nome)));
+  const sobrando = itens.filter(i => !daComposicao.has(normalizar(i.nome)));
+  if (sobrando.length) {
+    avisos.push(
+      `ATENÇÃO: ${sobrando.map(i => i.nome).join(', ')} não faz parte do ${combo.nome}. ` +
+      `O combo é exatamente ${combo.itens.map(p => `${p.quantidade}x ${p.rotulo}`).join(' + ')} por ${fmtBRL(combo.preco)}. ` +
+      `Com item a mais ou trocado, o pedido sai do combo e fica mais caro. Diga isso ao cliente e pergunte o que ele prefere.`
+    );
+  }
+
+  return { itens, avisos };
+}
+
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = { 'marmitex': 0, 'combos': 1, 'combo': 1, 'maioneses': 8, 'bebidas': 9 };
 function prioridadeCategoria(cat) {
@@ -334,6 +379,25 @@ async function executarTool(nome, args, contexto = {}) {
         }
       }
 
+      // Com um combo em jogo, a composição é preenchida a partir do banco antes
+      // de gravar. O combo pode ter sido escolhido agora (args.combo) ou numa
+      // mensagem anterior — nos dois casos os itens têm que sair daqui.
+      if (campos.itens) {
+        let comboEfetivo = null;
+        if (campos.combo_id) {
+          comboEfetivo = await db.buscarComboPorId(campos.combo_id);
+        } else if (args.combo == null) {
+          const atual = await db.carregarRascunho(telefone);
+          if (atual?.combo_id) comboEfetivo = await db.buscarComboPorId(atual.combo_id);
+        }
+
+        if (comboEfetivo) {
+          const completado = completarItensDoCombo(comboEfetivo, campos.itens);
+          campos.itens = completado.itens;
+          avisosExtras.push(...completado.avisos);
+        }
+      }
+
       // Chamada sem nenhum campo é legítima: é assim que o agente pede o
       // RESUMO_FINAL_TEXTO_EXATO quando o pedido já estava completo antes
       // desta mensagem (ex.: cliente disse "e aí, quanto ficou?").
@@ -375,7 +439,16 @@ async function executarTool(nome, args, contexto = {}) {
       if (todosAvisos.length) resumo.AVISOS = todosAvisos;
 
       if (comboAtivo) {
-        resumo.combo = `${comboAtivo.nome} — ${fmtBRL(comboAtivo.preco)} (entrega por nossa conta até ${fmtBRL(comboAtivo.subsidio_frete_max)})`;
+        // O preço fechado só vale se os itens forem EXATAMENTE a composição. Se
+        // não forem, o fechamento descarta o combo — e o agente precisa saber
+        // disso AGORA, senão promete "combo" ao cliente e entrega um total mais
+        // caro no resumo final, que foi a reclamação real de quem pediu o
+        // Almoço Resolvido e foi cobrado sem os itens.
+        resumo.combo = db.conferirComposicaoDoCombo(comboAtivo, itens)
+          ? `${comboAtivo.nome} — ${fmtBRL(comboAtivo.preco)} (entrega por nossa conta até ${fmtBRL(comboAtivo.subsidio_frete_max)})`
+          : `⚠️ ${comboAtivo.nome} NÃO vai ser aplicado: os itens não batem com a composição ` +
+            `(${comboAtivo.itens.map(p => `${p.quantidade}x ${p.rotulo}`).join(' + ')}). ` +
+            `Do jeito que está, o cliente paga os itens avulsos. Ajuste com ele antes de fechar.`;
       }
       if (comboDesconhecido) {
         resumo.ATENCAO_combo_inexistente = `Não existe combo chamado "${comboDesconhecido}". Use o nome exato que veio em buscar_itens_do_dia, ou siga com os itens avulsos. NÃO prometa preço de combo pro cliente.`;
