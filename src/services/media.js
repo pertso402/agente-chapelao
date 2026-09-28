@@ -190,4 +190,101 @@ async function analisarImagem(base64, mimetype = 'image/jpeg') {
   };
 }
 
-module.exports = { transcreverAudio, analisarImagem };
+// ─── COMPROVANTE EM PDF ───────────────────────────────────────────────────────
+// Nubank, Itaú e Caixa entregam o comprovante como ARQUIVO, não como foto — e o
+// WhatsApp manda isso como documentMessage. Até aqui a resposta era pedir um
+// print, o que joga trabalho no cliente que já pagou e já mandou a prova.
+//
+// A leitura é por TEXTO, não por visão: comprovante de banco é PDF de texto, o
+// número sai exato em vez de "lido" de uma imagem, custa uma fração e não erra
+// centavo. PDF escaneado (sem camada de texto) não tem o que extrair — aí sim
+// vale pedir a foto, mas aí é exceção, não a regra.
+const MIN_CARACTERES_PDF = 20;
+
+async function extrairTextoDoPdf(base64) {
+  // Carregado sob demanda: quem não recebe PDF nunca paga o custo de subir a
+  // biblioteca, e uma falha dela não derruba o resto da mídia.
+  const { PDFParse } = require('pdf-parse');
+
+  const parser = new PDFParse({ data: Buffer.from(base64, 'base64') });
+  try {
+    const { text } = await parser.getText();
+    return String(text || '').replace(/[ \t]{2,}/g, ' ').trim();
+  } finally {
+    // O parser segura worker e buffers; sem destruir, cada comprovante deixava
+    // memória pendurada num processo que fica ligado o dia inteiro.
+    await parser.destroy().catch(() => {});
+  }
+}
+
+async function analisarPdf(base64) {
+  let texto;
+  try {
+    texto = await extrairTextoDoPdf(base64);
+  } catch (err) {
+    const e = new Error(`PDF ilegível: ${err.message}`);
+    e.semTexto = true;
+    throw e;
+  }
+
+  if (texto.length < MIN_CARACTERES_PDF) {
+    // Provavelmente um PDF escaneado: a página é uma imagem, não há texto.
+    const e = new Error('PDF sem camada de texto (provavelmente escaneado).');
+    e.semTexto = true;
+    throw e;
+  }
+
+  const client = getClient();
+  const resposta = await client.chat.completions.create({
+    model: MODEL_VISAO,
+    max_completion_tokens: 1500,
+    reasoning_effort: 'low',
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'analise_imagem', strict: true, schema: SCHEMA_IMAGEM },
+    },
+    messages: [
+      {
+        role: 'user',
+        content:
+          `${INSTRUCAO_IMAGEM}\n\n` +
+          'O conteúdo abaixo foi EXTRAÍDO de um arquivo PDF enviado pelo cliente, ' +
+          'não é uma imagem. Como o texto veio do próprio arquivo, os valores são exatos: ' +
+          'não use confiança "baixa" alegando que está borrado ou cortado — isso não se aplica aqui. ' +
+          'Use "baixa" apenas se o texto realmente não trouxer o valor ou não for um comprovante.\n\n' +
+          `--- TEXTO DO PDF ---\n${texto.slice(0, 6000)}`,
+      },
+    ],
+  });
+
+  const bruto = resposta.choices[0]?.message?.content?.trim() || '';
+  if (!bruto) throw new Error('Modelo não retornou análise do PDF.');
+
+  let dados;
+  try {
+    dados = JSON.parse(bruto);
+  } catch {
+    throw new Error(`Resposta da análise do PDF não é JSON válido: ${bruto.slice(0, 200)}`);
+  }
+
+  const valor = dados.valor == null ? null : money(dados.valor);
+  const isComprovante = dados.eh_comprovante === true && dados.confianca === 'alta' && valor != null;
+
+  const partes = [dados.descricao];
+  if (valor != null) partes.push(`Valor: R$ ${valor.toFixed(2).replace('.', ',')}`);
+  if (dados.data_hora) partes.push(`Data/hora: ${dados.data_hora}`);
+  if (dados.destinatario) partes.push(`Destinatário: ${dados.destinatario}`);
+  if (dados.remetente) partes.push(`Pagador: ${dados.remetente}`);
+  if (dados.instituicao) partes.push(`Instituição: ${dados.instituicao}`);
+
+  return {
+    analise: partes.filter(Boolean).join(' | '),
+    isComprovante,
+    comprovanteDuvidoso: dados.eh_comprovante === true && !isComprovante,
+    valor,
+    confianca: dados.confianca,
+    dados,
+  };
+}
+
+module.exports = { transcreverAudio, analisarImagem, analisarPdf };

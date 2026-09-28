@@ -8,7 +8,7 @@ const logger = require('./logger');
 const {
   extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot, estadoInstancia,
 } = require('./services/evolution');
-const { transcreverAudio, analisarImagem } = require('./services/media');
+const { transcreverAudio, analisarImagem, analisarPdf } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho, atualizarRascunho,
@@ -443,6 +443,59 @@ async function processarMensagem(msg, requestId) {
       }
     }
 
+    // ── Mídia: comprovante em PDF ──────────────────────────────────────────
+    // Nubank, Itaú e Caixa mandam o comprovante como ARQUIVO. Antes a resposta
+    // era pedir um print — trabalho jogado em cima de quem já pagou e já mandou
+    // a prova. A leitura é por texto extraído do próprio PDF, então o valor sai
+    // exato, sem risco de ler centavo errado numa foto.
+    if (tipo === 'documentMessage') {
+      logger.step(requestId, telefone, 'midia/pdf');
+      try {
+        let b64 = base64Inline, mime = mimetypeInline || '';
+        if (!b64) {
+          const m = await comRetry(() => downloadMidia(key), { tentativas: 3, requestId, etapa: 'downloadDocumento' });
+          b64 = m.base64; mime = m.mimetype || mime;
+        }
+        if (!/pdf/i.test(mime)) throw Object.assign(new Error(`Arquivo não é PDF (${mime || 'tipo desconhecido'}).`), { semTexto: true });
+
+        const r = await comRetry(() => analisarPdf(b64), { tentativas: 2, requestId, etapa: 'pdf' });
+        isComprovante = r.isComprovante;
+        comprovanteValor = r.valor;
+
+        if (r.comprovanteDuvidoso) {
+          logger.warn('midia/comprovante-duvidoso', 'Comprovante em PDF com leitura incerta', {
+            requestId, telefone, confianca: r.confianca, valor: r.valor,
+          });
+          await escalarParaAtendente(telefone, `💸 [COMPROVANTE ILEGÍVEL] Cliente enviou comprovante em PDF que não deu pra ler com segurança (confiança: ${r.confianca}). Conferir manualmente. Leitura parcial: ${r.analise}`, requestId, {
+            mensagemCliente: 'Recebi seu comprovante! 📎 Só que não consegui ler ele com segurança aqui — vou pedir pra alguém da equipe conferir pra não ter erro. É rapidinho! 🙏',
+          });
+          return;
+        }
+
+        conteudo = isComprovante
+          ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
+          : `📎 [Documento]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
+        logger.info('midia/pdf/ok', 'PDF analisado', { requestId, telefone, isComprovante, valor: r.valor, confianca: r.confianca });
+      } catch (err) {
+        // Sem camada de texto (PDF escaneado) ou arquivo que não é PDF: aí sim
+        // a foto é o caminho, mas agora como exceção e não como regra.
+        if (err.semTexto) {
+          logger.info('midia/pdf/sem-texto', 'Arquivo sem texto legível, pedindo foto', { requestId, telefone, motivo: err.message });
+          await responder(
+            telefone,
+            `Recebi seu arquivo! 📎 Só que não consegui abrir ele aqui — pode me mandar um print de tela ou uma foto do comprovante? 🙏`,
+            { requestId, etapa: 'pix/pedirFoto' }
+          );
+          return;
+        }
+        logger.error('midia/pdf/erro', err.message, { requestId, telefone, stack: err.stack });
+        await escalarParaAtendente(telefone, `🤖 [ERRO TÉCNICO] Falha ao ler PDF enviado pelo cliente: ${err.message}`, requestId, {
+          mensagemCliente: 'Recebi seu arquivo, mas tive um problema pra abrir ele aqui 😕 Já chamei um atendente pra conferir — ele assume em instantes.',
+        });
+        return;
+      }
+    }
+
     // ── Localização (fixa ou em tempo real) ──────────────────────────────────
     if (tipo === 'locationMessage' || tipo === 'liveLocationMessage') {
       if (pingDeLocalizacaoRepetido(telefone)) {
@@ -541,23 +594,6 @@ async function processarMensagem(msg, requestId) {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
       cupom_ativo: ofertaAtiva?.codigo || null,
     });
-
-    // ── Comprovante mandado como PDF/arquivo, não como foto ──────────────────
-    // WhatsApp entrega comprovante de alguns bancos (ex: Nubank) como
-    // documentMessage, não imageMessage — e o agente não sabe ler PDF. Sem
-    // este bloco, isso caía direto na LLM, que não tinha o que fazer e ficava
-    // repetindo o resumo do pedido a cada mensagem nova (bug real observado
-    // em produção: 3 repetições seguidas pro mesmo cliente). Determinístico
-    // e sai ANTES do agente, então funciona mesmo com atendimento pausado.
-    if (tipo === 'documentMessage' && rascunho?.etapa_atual === 'aguardando_pix') {
-      logger.info('pix/comprovante-como-documento', 'Cliente mandou comprovante como arquivo/PDF, pedindo foto', { requestId, telefone });
-      await responder(
-        telefone,
-        `Recebi seu arquivo! 📎 Só que aqui eu só consigo conferir comprovante em *foto* — pode me mandar um print de tela ou uma foto do comprovante? 🙏`,
-        { requestId, etapa: 'pix/pedirFoto' }
-      );
-      return;
-    }
 
     // ── Comprovante que chega ANTES da hora ─────────────────────────────────
     // O cliente manda o comprovante quando quer, não quando o roteiro pede.
