@@ -1026,7 +1026,7 @@ module.exports = {
   carregarRascunho, salvarRascunho, stamparRascunho, atualizarRascunho, limparRascunho,
   tentarIniciarConfirmacao, tentarIniciarPagamento,
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo,
-  buscarCombos, buscarComboPorId, conferirComposicaoDoCombo, freteCliente,
+  buscarCombos, buscarComboPorId, freteCliente,
   buscarVideoBuffet, precificarPedido,
   solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarTaxasEstouradas, buscarTaxaPadrao,
