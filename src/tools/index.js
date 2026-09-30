@@ -394,23 +394,19 @@ async function executarTool(nome, args, contexto = {}) {
       // forma de pagamento é pré-requisito porque decide a plataforma em que
       // a corrida é pedida (PIX → iFood, dinheiro/cartão → outra), e isso
       // muda o preço. Pedir antes disso seria calcular a taxa errada.
-      if (rascunho.tipo_entrega === 'delivery' && rascunho.taxa_entrega == null) {
-        const faltaPraPedir = [];
-        if (!rascunho.endereco)        faltaPraPedir.push('endereço completo');
-        if (!rascunho.forma_pagamento) faltaPraPedir.push('forma de pagamento');
+      {
+        // A decisão e a abertura são do banco; aqui só se traduz o resultado
+        // pra LLM. O ponto é nunca mais dizer "já estamos calculando" quando
+        // nada foi aberto — o agente repetiu isso três vezes pra uma cliente
+        // que acabou pagando sozinha, sem nunca receber um total.
+        const taxa = await db.garantirPedidoDeTaxa({ ...rascunho, telefone });
 
-        if (faltaPraPedir.length) {
-          resumo.TAXA_ENTREGA = `Ainda não dá pra calcular a entrega: falta ${faltaPraPedir.join(' e ')}. Peça isso agora, numa pergunta só. Não invente valor de entrega.`;
-        } else {
-          const abriu = await db.solicitarTaxaEntrega(telefone).catch(() => false);
-          if (abriu) {
-            await db.criarAlertaAtendimento(
-              telefone,
-              rascunho.nome_cliente,
-              `TAXA DE ENTREGA: calcular para ${rascunho.endereco} (pagamento: ${rascunho.forma_pagamento}) e digitar o valor no painel.`
-            ).catch(() => {});
-          }
+        if (taxa.estado === 'falta_dado') {
+          resumo.TAXA_ENTREGA = `Ainda não dá pra calcular a entrega: falta ${taxa.falta.join(' e ')}. Peça isso agora, numa pergunta só. Não invente valor de entrega.`;
+        } else if (taxa.estado === 'aberto' || taxa.estado === 'ja_pedido') {
           resumo.TAXA_ENTREGA = 'A equipe já está calculando a taxa para este endereço. Avise o cliente que você está confirmando o valor da entrega e que já volta com o total fechado — em pouquinho tempo. NÃO chute valor, NÃO mande resumo, NÃO peça confirmação ainda. O sistema manda a mensagem com o total assim que a taxa sair.';
+        } else if (taxa.estado === 'falhou') {
+          resumo.TAXA_ENTREGA = 'ATENÇÃO: NÃO consegui abrir o cálculo da entrega — ninguém foi avisado no painel. NÃO diga que está calculando e NÃO prometa voltar com o valor, porque não vai. Chame chamar_atendente AGORA, explicando que o cliente está esperando o valor da entrega.';
         }
       }
 

@@ -14,7 +14,7 @@ const {
   carregarRascunho, salvarRascunho, stamparRascunho, limparRascunho, atualizarRascunho,
   precificarPedido, buscarTaxasEstouradas, buscarTaxaPadrao,
   buscarComboPorId, freteCliente,
-  definirTaxaEntrega, reivindicarAvisosDeTaxa,
+  definirTaxaEntrega, reivindicarAvisosDeTaxa, garantirPedidoDeTaxa,
   buscarInfo, buscarVideoBuffet, criarPedidoCompleto, tentarIniciarPagamento,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
@@ -508,6 +508,19 @@ async function processarMensagem(msg, requestId) {
           logger.warn('estado/captura-falhou', err.message, { requestId, telefone });
           return null;
         }))?.rascunho || rascunho;
+
+        // Quando é o CÓDIGO que completa o último campo, a LLM não tem mais o
+        // que salvar e pode não chamar salvar_dados_pedido — e o cálculo da
+        // entrega, que mora lá dentro, nunca era aberto. Foi o que aconteceu
+        // com a Cida (30/09): ela respondeu "No PIX, qual o valor?", o código
+        // gravou o pix, o painel nunca soube da entrega, e ela esperou,
+        // perguntou três vezes e acabou pagando por conta própria.
+        const taxa = await garantirPedidoDeTaxa({ ...rascunho, telefone });
+        if (taxa.estado === 'aberto') {
+          logger.info('taxa/aberta-pela-captura', 'Cálculo da entrega aberto após captura determinística', {
+            requestId, telefone,
+          });
+        }
       }
     }
 

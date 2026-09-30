@@ -50,6 +50,9 @@ require.cache[caminhoDb] = {
     carregarRascunho: async () => rascunho,
     marcarInteresse: async () => {},
     solicitarTaxaEntrega: async () => false,
+    // Sem endereço no rascunho de teste, o cálculo da entrega não tem como
+    // abrir — que é justamente o caminho que a tool deve traduzir pra LLM.
+    garantirPedidoDeTaxa: async () => ({ estado: 'falta_dado', falta: ['endereço completo'] }),
     criarAlertaAtendimento: async () => {},
     pausarAtendimento: async () => {},
     atualizarStatusPedido: async () => ({ numero_pedido: 1 }),

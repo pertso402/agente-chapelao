@@ -525,6 +525,55 @@ async function solicitarTaxaEntrega(telefone) {
   return (data || []).length > 0; // true = este chamado foi quem abriu o pedido
 }
 
+// Decide, a partir do ESTADO do rascunho, se o cálculo da entrega precisa ser
+// aberto — e abre. Existe porque o gatilho morava dentro de salvar_dados_pedido,
+// e isso tinha dois furos que custaram uma venda real (Cida, 30/09):
+//
+//   1. A captura determinística grava forma_pagamento e tipo_entrega FORA da
+//      tool. Quando ela completa o último campo que faltava, a LLM não tem mais
+//      o que salvar, não chama a tool, e o pedido de taxa nunca é aberto. Foi
+//      exatamente isso: ela respondeu "No PIX, qual o valor?", o código gravou
+//      o pix, e o painel nunca soube que havia uma entrega pra calcular.
+//   2. O erro era engolido por `.catch(() => false)` e a LLM era instruída a
+//      dizer "a equipe já está calculando" de qualquer jeito — inclusive quando
+//      nada tinha sido aberto. Por isso o agente repetia com tanta confiança
+//      que já voltava com o valor.
+//
+// Agora o gatilho depende do ESTADO, não de qual caminho gravou o campo, e o
+// resultado é devolvido por extenso pra quem chamou poder falar a verdade.
+async function garantirPedidoDeTaxa(rascunho) {
+  if (!rascunho || rascunho.tipo_entrega !== 'delivery') return { estado: 'nao_e_entrega' };
+  if (rascunho.taxa_entrega != null) return { estado: 'ja_tem_taxa' };
+
+  const falta = [];
+  if (!rascunho.endereco) falta.push('endereço completo');
+  if (!rascunho.forma_pagamento) falta.push('forma de pagamento');
+  if (falta.length) return { estado: 'falta_dado', falta };
+
+  if (rascunho.taxa_solicitada_em) return { estado: 'ja_pedido' };
+
+  try {
+    const abriu = await solicitarTaxaEntrega(rascunho.telefone);
+    if (!abriu) return { estado: 'ja_pedido' };
+
+    // O alerta é o que faz o pedido APARECER no painel. Se ele falhar, o
+    // cálculo fica aberto sem ninguém saber — então não se engole também.
+    // A trava de tempo que já existe aplica a taxa padrão e destrava o cliente,
+    // em vez de deixá-lo esperando pra sempre.
+    await criarAlertaAtendimento(
+      rascunho.telefone,
+      rascunho.nome_cliente,
+      `TAXA DE ENTREGA: calcular para ${rascunho.endereco} (pagamento: ${rascunho.forma_pagamento}) e digitar o valor no painel.`
+    );
+    return { estado: 'aberto' };
+  } catch (err) {
+    logger.error('taxa/pedido-falhou', err.message, {
+      telefone: rascunho.telefone, endereco: rascunho.endereco, stack: err.stack,
+    });
+    return { estado: 'falhou', erro: err.message };
+  }
+}
+
 // Chamado pelo painel quando alguém digita o valor. Também usado pelo próprio
 // agente quando o tempo estoura (aí com origem 'padrao').
 async function definirTaxaEntrega(telefone, valor, origem = 'definida') {
@@ -1028,7 +1077,7 @@ module.exports = {
   buscarProdutos, precoFinal, validarItens, buscarItensDoDia, buscarInfo,
   buscarCombos, buscarComboPorId, freteCliente,
   buscarVideoBuffet, precificarPedido,
-  solicitarTaxaEntrega, definirTaxaEntrega, reivindicarAvisosDeTaxa,
+  solicitarTaxaEntrega, garantirPedidoDeTaxa, definirTaxaEntrega, reivindicarAvisosDeTaxa,
   buscarTaxasEstouradas, buscarTaxaPadrao,
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   garantirCliente, garantirBrindeDeAnuncio, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
