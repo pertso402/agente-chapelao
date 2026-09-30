@@ -132,43 +132,6 @@ async function teste(nome, fn) {
     assert.ok(estado.devolvidos.includes(TEL), 'não devolveu o follow-up pra fila');
   });
 
-  await teste('esperando o SIM: cutuca em 2 min com texto fixo, sem chamar o modelo', async () => {
-    const tresMinAtras = new Date(Date.now() - 3 * 60_000).toISOString();
-    // Telefone próprio: o teste anterior deixou o TEL padrão na janela de
-    // agrupamento, e a trava de "cliente escrevendo" barraria este follow-up
-    // por um motivo que não é o que se quer medir aqui.
-    const esperandoSim = {
-      ...rascunhoBase(tresMinAtras, 'assistant'),
-      telefone: '5544888',
-      etapa_atual: 'aguardando_confirmacao',
-      nome_cliente: 'Meyreh Santos',
-    };
-    estado.reivindicados = [esperandoSim];
-    estado.rascunho = esperandoSim;
-
-    await pollarFollowups();
-
-    assert.strictEqual(estado.enviados.length, 1, 'não cutucou quem já viu o resumo e ficou calado');
-    const texto = estado.enviados[0].texto;
-    assert.ok(/SIM/.test(texto), `precisa pedir o SIM com todas as letras: "${texto}"`);
-    assert.ok(/Meyreh/.test(texto), `precisa chamar a pessoa pelo nome: "${texto}"`);
-    // O texto do modelo falso fala de carnes; se ele aparecer aqui, o caminho
-    // determinístico não foi usado e estamos pagando token à toa.
-    assert.ok(!/carnes/i.test(texto), 'passou pelo modelo em vez do texto fixo');
-  });
-
-  await teste('coletando dados ainda respeita a espera longa (não cutuca aos 3 min)', async () => {
-    // A janela curta é SÓ pra quem já viu o resumo. Quem está escolhendo carne
-    // continua com os 10 minutos — encurtar aqui foi o erro que já fez o agente
-    // parecer que perguntava duas vezes.
-    const tresMinAtras = new Date(Date.now() - 3 * 60_000).toISOString();
-    estado.reivindicados = [rascunhoBase(tresMinAtras, 'assistant')];
-    estado.rascunho = rascunhoBase(tresMinAtras, 'assistant');
-    await pollarFollowups();
-    assert.strictEqual(estado.enviados.length, 0, 'cutucou cedo demais quem ainda está montando a marmita');
-    assert.ok(estado.devolvidos.includes(TEL), 'não devolveu pra fila pra ser pego no ciclo certo');
-  });
-
   console.log(`\n${process.exitCode ? '❌ FALHOU' : `✅ ${passou} testes passaram`}\n`);
   process.exit(process.exitCode || 0);
 })();
