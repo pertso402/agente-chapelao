@@ -480,14 +480,7 @@ async function processarMensagem(msg, requestId) {
         // Sem camada de texto (PDF escaneado) ou arquivo que não é PDF: aí sim
         // a foto é o caminho, mas agora como exceção e não como regra.
         if (err.semTexto) {
-          // Biblioteca fora do ar é problema de DEPLOY, não do arquivo do
-          // cliente: vai como warn pra aparecer no painel de logs, senão a
-          // leitura de PDF fica desligada em silêncio e ninguém percebe.
-          if (err.bibliotecaIndisponivel) {
-            logger.warn('midia/pdf/biblioteca-indisponivel', 'Leitura de PDF desligada no ambiente — voltando a pedir foto', { requestId, telefone, motivo: err.message });
-          } else {
-            logger.info('midia/pdf/sem-texto', 'Arquivo sem texto legível, pedindo foto', { requestId, telefone, motivo: err.message });
-          }
+          logger.info('midia/pdf/sem-texto', 'Arquivo sem texto legível, pedindo foto', { requestId, telefone, motivo: err.message });
           await responder(
             telefone,
             `Recebi seu arquivo! 📎 Só que não consegui abrir ele aqui — pode me mandar um print de tela ou uma foto do comprovante? 🙏`,
