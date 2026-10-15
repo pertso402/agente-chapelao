@@ -62,7 +62,7 @@ O modelo gpt-4o foi verificado como disponível com a chave já existente no Eas
 
 Nesta versão, a IA consulta o catálogo e informações gerais. Pedidos, alterações, pagamentos, reclamações e mídia são encaminhados para pessoas. Ela não grava pedido, não aprova pagamento e não executa ferramentas de cupons/cancelamentos do agente legado. O legado armazenava sessões por telefone; reutilizá-las misturaria o contexto dos dois números.
 
-O adaptador retorna reply, handoff ou no_action. Não envia diretamente à Evolution. Falha do modelo gera encaminhamento humano. A configuração operacional de IA por instância deve ser conferida no painel; não é inferida apenas do WhatsApp estar conectado.
+O adaptador retorna reply, handoff ou no_action. Não envia diretamente à Evolution. Falha do modelo gera encaminhamento humano. Na conclusão desta instalação, o principal está com IA habilitada e o secundário está com IA pausada para atendimento da equipe. Essa configuração pode ser conferida em Operação e instâncias.
 
 ## Isolamento e coordenação
 
@@ -148,7 +148,7 @@ A prévia localhost:3000 usa banco em memória e dados fictícios, sem ler .env 
 ## Verificação realizada
 
 - Compilação TypeScript/Vite e verificação de sintaxe.
-- Suíte funcional da central, incluindo RLS, isolamento, idempotência, assunção, descarte de IA obsoleta, mídia autenticada, envios incertos, revogação e acesso por aparelho.
+- 23 testes funcionais da central passaram, incluindo RLS, isolamento, idempotência, assunção, descarte de IA obsoleta, mídia autenticada, envios incertos, revogação e acesso por aparelho.
 - Os 12 grupos de testes existentes passaram, com 121 verificações.
 - npm audit retornou zero vulnerabilidades na revisão das dependências.
 - PostgreSQL real: TLS validado e exclusão entre duas sessões para a mesma conversa.
