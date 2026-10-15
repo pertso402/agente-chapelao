@@ -872,3 +872,107 @@ test("oferta enviada externamente não cria chamado nem reabre conversa encerrad
   assert.equal(closed.cycle,2);
   assert.equal((await s.pool.query("select id from cw_handoffs where status in ('pending','claimed')")).rows.length,0);
 });
+
+test("entrada direta abre sem cookie, ativação, e-mail ou senha, preservando origem e segredo do webhook", async t => {
+  const s=await setup();t.after(()=>s.pool.end());s.config.authMode="open";s.config.openAccessUserId=USERS.admin;
+  const {app}=createApp({...s});const server=app.listen(0,"127.0.0.1");await new Promise(r=>server.once("listening",r));t.after(()=>new Promise(r=>server.close(r)));
+  const base="http://127.0.0.1:"+server.address().port;
+  const me=await fetch(base+"/api/me");assert.equal(me.status,200);assert.equal((await me.json()).name,"Equipe");
+  assert.equal((await fetch(base+"/api/conversations")).status,200);
+  assert.equal((await fetch(base+"/api/instances/"+IDS.primary+"/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:true})})).status,403);
+  assert.equal((await fetch(base+"/api/webhooks/evolution/"+IDS.primary,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload(),instance:"Chapela - atendimento"})})).status,401);
+  s.config.openAccessUserId=USERS.outsider;
+  assert.equal((await fetch(base+"/api/me")).status,403);
+});
+
+async function fullSetup(t, processor) {
+  const s=await setup();t.after(()=>s.pool.end());
+  s.config.fullAgent=true;
+  s.engine.processLegacy=processor;
+  s.engine.loadLegacyHistory=async()=>[];
+  s.engine.extractLegacy=({data})=>({telefone:"invalid",texto:data.message?.conversation||"",key:data.key,tipo:"text",pushName:"Cliente teste"});
+  s.engine.recordLegacyAccepted=async()=>{};
+  await s.engine.setAI(USERS.admin,IDS.primary,true,randomUUID());
+  return s;
+}
+test("agente completo executa o fluxo original uma vez e envia pela outbox",async t=>{
+ let runs=0;
+ const s=await fullSetup(t,async msg=>{runs++;assert.equal(msg.telefone,"554400000000");await require("../src/central/legacy-context").current().respond(msg.telefone,"Pedido #42 confirmado pelo fluxo original.");});
+ const c=await ingest(s);await due(s);const job=await s.engine.lease();
+ await s.engine.runAI(job);await s.engine.runAI(job);
+ assert.equal(runs,1);
+ const rows=(await s.pool.query("select * from cw_messages where direction='out'")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].status,"pending");
+ const send=await s.engine.lease();await s.engine.dispatch(send);
+ assert.equal(s.sends.length,1);
+ assert.equal(s.sends[0].id,IDS.primary);assert.equal((await s.engine.context(s.pool,c.id)).state,"ai");
+});
+test("pedido original encaminha só quando solicitado e a confirmação para o cliente é cancelável",async t=>{
+ const s=await fullSetup(t,async msg=>{const scope=require("../src/central/legacy-context").current();scope.requestHandoff("Cliente solicitou negociação.");await scope.respond(msg.telefone,"Vou chamar uma pessoa da equipe.");});
+ const c=await ingest(s);await due(s);const job=await s.engine.lease();await s.engine.runAI(job);
+ assert.equal((await s.engine.context(s.pool,c.id)).state,"waiting_human");
+ const messages=(await s.pool.query("select * from cw_messages where direction='out'")).rows;
+ assert.equal(messages[0].author,"system");
+ await s.engine.command(USERS.alice,c.id,"claim",{},randomUUID());
+ const send=await s.engine.lease();await s.engine.dispatch(send);
+ assert.equal(s.sends.length,0);
+});
+test("interrupção depois de iniciar o agente completo pede conferência sem refazer pedido",async t=>{
+ let calls=0;const s=await fullSetup(t,async()=>{calls++;});
+ const c=await ingest(s);await due(s);const job=await s.engine.lease();
+ await s.pool.query("insert into cw_private.legacy_runs(decision_key,restaurant_id,instance_id,conversation_id,status) values($1,$2,$3,$4,'running')",[job.dedup_key,IDS.restaurant,IDS.primary,c.id]);
+ await s.engine.runAI(job);
+ assert.equal(calls,0);
+ assert.equal((await s.engine.context(s.pool,c.id)).state,"waiting_human");
+ assert.equal((await s.pool.query("select status from cw_private.legacy_runs")).rows[0].status,"uncertain");
+});
+test("controle humano impede chamar o agente completo para tarefa antiga",async t=>{
+ let calls=0;const s=await fullSetup(t,async()=>{calls++;});
+ const c=await ingest(s);await due(s);const job=await s.engine.lease();
+ await s.engine.command(USERS.alice,c.id,"claim",{},randomUUID());
+ await s.engine.runAI(job);assert.equal(calls,0);
+});
+test("áudio e comprovante seguem ao fluxo original em vez de encaminhamento automático",async t=>{
+ const s=await fullSetup(t,async()=>{});
+ for(const [id,type]of [["audio-full","audioMessage"],["pix-full","imageMessage"]]){
+  const data=payload(id).data;data.message={[type]:{caption:"comprovante"}};
+  await s.engine.ingest(IDS.primary,{event:"MESSAGES_UPSERT",data});
+ }
+ assert.equal((await s.pool.query("select state from cw_conversations")).rows[0].state,"ai");
+ const jobs=(await s.pool.query("select payload from cw_private.jobs where type='ai'")).rows;
+ assert.equal(jobs.length,2);assert.equal(jobs[1].payload.providerMessage.key.id,"pix-full");
+});
+test("agente original entende confirmação por reação e telefone alternativo sem misturar JID",()=>{
+ const p=payload("reaction").data;p.message={reactionMessage:{text:"👍"}};
+ p.key.remoteJid="1234567@lid";p.key.remoteJidAlt="554400000000@s.whatsapp.net";
+ const parsed=parseMessage(p,{fullAgent:true});
+ assert.equal(parsed.text,"👍");assert.equal(parsed.phone,"554400000000");assert.equal(parsed.jid,"1234567@lid");
+});
+test("secundário continua humano sem compartilhar rascunho do principal",async t=>{
+ const s=await fullSetup(t,async()=>{});
+ await assert.rejects(()=>s.engine.setAI(USERS.admin,IDS.secondary,true,randomUUID()),e=>e.status===409);
+});
+
+test("worker pode rodar junto ao servidor e encerrar sem fechar o pool compartilhado",async()=>{
+ const {startWorker}=require("../src/central/worker-main");
+ let ticks=0,closed=false;
+ const engine={async refreshConnection(){},async tick(){ticks++;return false;}};
+ const worker=startWorker({pool:{end:async()=>{closed=true;}},config:{fullAgent:false,instances:[]},engine});
+ await new Promise(r=>setTimeout(r,30));worker.stop();await worker.done;
+ assert.ok(ticks>0);assert.equal(closed,false);
+});
+
+test("lembrete original respeita atendimento humano e retomada aguarda nova mensagem",async t=>{
+ const s=await fullSetup(t,async()=>{});
+ const full=require("../src/central/full-agent");
+ const stop=full.configure(s.engine);t.after(stop);
+ const c=await ingest(s);
+ await s.engine.command(USERS.alice,c.id,"claim",{},randomUUID());
+ assert.equal(await full.backgroundPaused(c.phone),true);
+ assert.equal(await full.backgroundReply(c.phone,"lembrete",{requestId:"paused",etapa:"followup"}),false);
+ await s.engine.command(USERS.alice,c.id,"resume-ai",{},randomUUID());
+ assert.equal(await full.backgroundReply(c.phone,"lembrete",{requestId:"resumed",etapa:"followup"}),false);
+ await s.engine.ingest(IDS.primary,{event:"MESSAGES_UPSERT",data:payload("next-full","Pode continuar").data});
+ assert.equal(await full.backgroundReply(c.phone,"resposta",{requestId:"next",etapa:"taxa"}),true);
+ assert.equal(await full.backgroundReply(c.phone,"resposta",{requestId:"next",etapa:"taxa"}),false);
+});

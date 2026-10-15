@@ -25,9 +25,11 @@ function configuration(env = process.env) {
   return {
     restaurantId: IDS.restaurant,
     authMode:
-      ["internal_network", "trusted_device"].includes(env.CENTRAL_AUTH_MODE)
+      ["internal_network", "trusted_device", "open"].includes(env.CENTRAL_AUTH_MODE)
         ? env.CENTRAL_AUTH_MODE
         : "password",
+    openAccessUserId: env.CENTRAL_OPEN_USER_ID || "",
+    fullAgent: env.CENTRAL_FULL_AGENT === "true",
     internalAllowedCidrs: (env.CENTRAL_ALLOWED_CIDRS || "")
       .split(",")
       .map((v) => v.trim())

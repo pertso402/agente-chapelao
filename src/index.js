@@ -5,6 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const { randomUUID: uuid } = require('node:crypto');
 const logger = require('./logger');
+const legacyContext = require('./central/legacy-context');
 const {
   extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot, estadoInstancia,
 } = require('./services/evolution');
@@ -43,8 +44,13 @@ const fmt = fmtBRL;
 // de propósito — evita ter que lembrar de stampar em cada um dos vários pontos
 // que respondem ao cliente.
 async function responder(telefone, texto, { requestId, etapa }) {
-  await comRetry(() => enviarTexto(telefone, texto), { tentativas: 3, requestId, etapa });
-  await salvarMensagem(telefone, 'assistant', texto);
+  const scope = legacyContext.current();
+  if (scope) await scope.respond(telefone, texto, { requestId, etapa });
+  else if (process.env.CENTRAL_FULL_AGENT === 'true') {
+    const queued = await require('./central/full-agent').backgroundReply(telefone, texto, { requestId, etapa });
+    if (!queued) return;
+  } else await comRetry(() => enviarTexto(telefone, texto), { tentativas: 3, requestId, etapa });
+  if (scope || process.env.CENTRAL_FULL_AGENT !== 'true') await salvarMensagem(telefone, 'assistant', texto);
   // stamparRascunho (não salvarRascunho): só atualiza se o rascunho já existir.
   // Se o pedido acabou de ser finalizado (limparRascunho apagou a linha
   // segundos atrás), isso NÃO pode recriar um rascunho fantasma — era
@@ -195,7 +201,7 @@ const CONFIRMACOES_EMOJI = new Set([
 ]);
 
 function ehConfirmacao(texto) {
-  const bruto = String(texto || '').trim();
+  const bruto = String(texto || '').replace(/^🎙️ \[Áudio\]:\s*/u, '').trim();
   if (!bruto) return false;
 
   // Reação do WhatsApp ou mensagem só com emoji: o conteúdo inteiro é o emoji.
@@ -1159,7 +1165,7 @@ function startLegacy() {
 if (require.main === module) startLegacy();
 
 module.exports = {
-  startLegacy,
+  startLegacy, processarMensagem,
   app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas,
   _testes: { agruparMensagem, despachar, ehConfirmacao },
 };

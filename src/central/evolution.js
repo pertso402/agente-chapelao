@@ -25,7 +25,7 @@ function normalizeEvents(body) {
     dedup: digest({ event, data, instance: payload.instance }),
   }));
 }
-function parseMessage(data) {
+function parseMessage(data, { fullAgent = false } = {}) {
   assert(data && typeof data === "object", 422, "Mensagem sem dados.");
   if (data.isHistory === true || data.type === "append") return null;
   const key = data.key;
@@ -46,10 +46,16 @@ function parseMessage(data) {
     m.viewOnceMessage?.message ||
     m.viewOnceMessageV2?.message ||
     m;
-  if (m.reactionMessage || m.protocolMessage || m.senderKeyDistributionMessage)
+  if ((!fullAgent && m.reactionMessage) || m.protocolMessage || m.senderKeyDistributionMessage)
     return null;
   let kind = "text",
     text = m.conversation ?? m.extendedTextMessage?.text;
+  if (fullAgent && m.reactionMessage) { text = m.reactionMessage.text; if (!text) return null; }
+  if (fullAgent && (m.locationMessage || m.liveLocationMessage)) {
+    const location = m.locationMessage || m.liveLocationMessage;
+    if (!Number.isFinite(location.degreesLatitude) || !Number.isFinite(location.degreesLongitude)) return null;
+    text = "📍 " + (location.address || location.name || "Localização compartilhada") + " https://www.google.com/maps?q=" + location.degreesLatitude + "," + location.degreesLongitude;
+  }
   if (typeof text !== "string") {
     const media = [
       "imageMessage",
@@ -78,7 +84,7 @@ function parseMessage(data) {
         ? data.pushName.slice(0, 160)
         : "Cliente",
     providerAt: date,
-    phone: /@(s\.whatsapp\.net|c\.us)$/.test(jid) ? jid.split("@")[0] : null,
+    phone: /@(s\.whatsapp\.net|c\.us)$/.test(jid) ? jid.split("@")[0] : /^[0-9]{10,15}@(s\.whatsapp\.net|c\.us)$/.test(key.remoteJidAlt || "") ? key.remoteJidAlt.split("@")[0] : null,
     mediaKey:
       kind === "text"
         ? null

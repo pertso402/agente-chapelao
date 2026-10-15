@@ -23,6 +23,7 @@ async function testDatabase() {
     "utf8",
   );
   await db.exec(sql);
+  await db.exec(await fs.readFile(path.join(__dirname,"../supabase/migrations/20261015084000_full_agent.sql"),"utf8"));
   for (const [name, id] of Object.entries(USERS))
     await db.query("insert into auth.users values($1,$2)", [
       id,

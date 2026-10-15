@@ -23,12 +23,16 @@ function createApp({
       : null;
   if (internal) app.set("trust proxy", internal.trustProxy);
   const supabase =
-    authenticate || internal
+    authenticate || internal || config.authMode === "open"
       ? null
       : createClient(config.supabaseUrl, config.publishableKey, {
           auth: { persistSession: false, autoRefreshToken: false },
         });
   app.disable("x-powered-by");
+  app.get("/",(req,res,next)=>{
+    if(config.fullAgent && req.hostname==="agente-agente-chapelao.b1h6rm.easypanel.host" && new URL(config.origin).hostname!==req.hostname) return res.redirect(302,config.origin+"/");
+    next();
+  });
   app.use((req, res, next) => {
     res.set({
       "X-Content-Type-Options": "nosniff",
@@ -50,6 +54,7 @@ function createApp({
       publishableKey: config.publishableKey,
       restaurantId: config.restaurantId,
       demo,
+      agentMode: config.fullAgent ? "legacy_full" : "catalog_only",
       authMode: config.authMode || "password",
     }),
   );
@@ -98,9 +103,12 @@ function createApp({
   app.use("/api", (req, res, next) => {
     (async () => {
       const token = req.get("Authorization")?.match(/^Bearer (.+)$/)?.[1];
-      if (!internal) assert(token, 401, "Entre na central.");
+      if (!internal && config.authMode !== "open") assert(token, 401, "Entre na central.");
       let user;
-      if (internal) {
+      if (config.authMode === "open") {
+        assert(uuid(config.openAccessUserId), 503, "Configure o perfil compartilhado da equipe.");
+        user = { id: config.openAccessUserId };
+      } else if (internal) {
         internal.checkNetwork(req);
         user = internal.read(req);
       } else if (authenticate) user = await authenticate(token);
@@ -130,7 +138,7 @@ function createApp({
     asyncRoute(async (req, res) =>
       res.json({
         id: req.user.id,
-        name: req.member.display_name,
+        name: config.authMode === "open" ? "Equipe" : req.member.display_name,
         role: req.member.role,
       }),
     ),
@@ -409,10 +417,22 @@ function createApp({
 }
 function start() {
   const pool = createDatabase();
-  const { app } = createApp({ pool });
+  const config = configuration();
+  const { app } = createApp({ pool, config });
+  const worker = process.env.CENTRAL_RUN_WORKER === "true" ? require("./worker-main").startWorker({ pool, config }) : null;
   const server = app.listen(process.env.PORT || 3000, () =>
     console.log('{"event":"central.started"}'),
   );
-  process.on("SIGTERM", () => server.close(() => pool.end()));
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    worker?.stop();
+    server.close(async () => { if (worker) await worker.done.catch(() => {}); await pool.end(); });
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  if (worker) worker.done.catch(() => { console.error('{"event":"worker.stopped_unexpectedly"}'); process.exitCode = 1; stop(); });
+  return { server, worker, stop };
 }
 module.exports = { createApp, start };

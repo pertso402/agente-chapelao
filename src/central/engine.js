@@ -292,6 +292,7 @@ class Engine {
     );
   }
   async setAI(user, id, enabled, key) {
+    assert(!(this.config.fullAgent && enabled && id !== require("./config").IDS.primary), 409, "O secundário permanece em atendimento humano para preservar os pedidos do principal separados.");
     assert(typeof enabled === "boolean", 400, "Informe enabled booleano.");
     assert(
       this.config.instances.some((i) => i.id === id),
@@ -485,7 +486,7 @@ class Engine {
         422,
         "Evento de saída inválido.",
       );
-    const msg = parseMessage(event.data);
+    const msg = parseMessage(event.data, { fullAgent: this.config.fullAgent && instanceId === require("./config").IDS.primary });
     if (!msg) return { discarded: true };
     return withLocks(this.pool, instanceId, msg.jid, (q) =>
       transaction(q, async () => {
@@ -579,7 +580,8 @@ class Engine {
           ],
         );
         c = await this.context(q, c.id);
-        if (msg.kind !== "text" && c.state === "ai")
+        const originalSupportsMedia = this.config.fullAgent && instanceId === require("./config").IDS.primary && ["image", "audio", "document"].includes(msg.kind);
+        if (msg.kind !== "text" && c.state === "ai" && !originalSupportsMedia)
           await this.handoff(
             q,
             c,
@@ -608,6 +610,7 @@ class Engine {
             inst.id,
             c.id,
             {
+              providerMessage: event.data,
               control_epoch: c.control_epoch,
               inbound_seq: c.inbound_seq,
               config_epoch: inst.config_epoch,
@@ -670,6 +673,7 @@ class Engine {
     );
   }
   async runAI(job) {
+    if (this.config.fullAgent) return require("./full-agent").run(this, job);
     const completed = await this.pool.query(
       "select decision_key from cw_private.ai_decisions where decision_key=$1",
       [job.dedup_key],
@@ -815,6 +819,7 @@ class Engine {
             : fresh.state === "human" &&
               fresh.assignee_id === message.author_id &&
               String(fresh.control_epoch) === String(message.control_epoch);
+        if (message.author === "system") valid = fresh.state === "waiting_human" && String(fresh.control_epoch) === String(message.control_epoch) && fresh.cycle === message.cycle;
         if (message.author === "human") {
           const m = await q.query(
             "select active from cw_members where restaurant_id=$1 and user_id=$2 for share",
@@ -829,6 +834,10 @@ class Engine {
           );
           message = null;
           return;
+        }
+        if (message.author === "ai" && this.config.fullAgent) {
+          const inbox = await q.query("select id from cw_private.jobs where instance_id=$1 and type='webhook' and status in ('pending','running') and payload->>'event'='MESSAGES_UPSERT' and payload->'data'->'key'->>'remoteJid'=$2 and payload->'data'->'key'->>'fromMe'='false' limit 1", [c.instance_id,c.chat_jid]);
+          assert(!inbox.rows.length,503,"Processando uma nova mensagem do cliente antes do envio.");
         }
         // Falha de conexão conhecida ocorre ANTES do POST e pode voltar à fila.
         assert(
@@ -866,6 +875,9 @@ class Engine {
           status,
         });
       });
+      if (status === "accepted" && this.config.fullAgent) {
+        await (this.recordLegacyAccepted || require("./full-agent").recordAccepted)(c, message).catch(() => console.error('{"event":"original_agent.history_mirror_failed"}'));
+      }
     });
   }
   async lease() {

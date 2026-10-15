@@ -7,7 +7,7 @@ type Config = {
   publishableKey: string;
   restaurantId: string;
   demo: boolean;
-  authMode: "password" | "internal_network" | "trusted_device";
+  authMode: "password" | "internal_network" | "trusted_device" | "open";
 };
 type Me = { id: string; name: string; role: string };
 type Instance = {
@@ -243,6 +243,7 @@ function App() {
       .then((r) => readResponse(r))
       .then((c: Config) => {
         setConfig(c);
+        if (c.authMode === "open") { setToken("shared-access"); return; }
         if (c.authMode !== "password") return;
         if (c.demo) {
           setToken("demo");
@@ -265,7 +266,7 @@ function App() {
       );
   }, []);
   useEffect(() => {
-    if (!config || config.authMode === "password" || token) return;
+    if (!config || config.authMode === "password" || config.authMode === "open" || token) return;
     let active = true;
     setInternalLoading(true);
     const activate = activationToken;
@@ -662,6 +663,7 @@ function App() {
         Carregando a central…{error && <p role="alert">{error}</p>}
       </div>
     );
+  if (!token && config.authMode === "open") return <div className="loading">Abrindo a central…{error && <p role="alert">{error}</p>}</div>;
   if (!token && config.authMode !== "password")
     return (
       <main className="internal-entry">
@@ -897,9 +899,10 @@ function App() {
           <span className="user-name">
             {me?.name || "Carregando"}
             <small>
-              {me?.role === "admin" ? "Administradora" : "Atendente"}
+              {config.authMode === "open" ? "Acesso da equipe" : me?.role === "admin" ? "Administradora" : "Atendente"}
             </small>
           </span>
+          {config.authMode !== "open" && (
           <button
             className="icon-button"
             title={config.authMode !== "password" ? "Trocar pessoa" : "Sair"}
@@ -908,6 +911,7 @@ function App() {
           >
             <Icon name="logout" />
           </button>
+          )}
         </div>
       </header>
       <div className="workspace-heading">
