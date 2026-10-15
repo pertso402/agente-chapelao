@@ -1,12 +1,12 @@
 {
   "name": "chapelao-agente",
   "version": "3.1.0",
-  "description": "Agente de atendimento WhatsApp do Restaurante Chapelão (OpenAI GPT-5.6)",
+  "description": "Agente e central unificada de atendimento do Restaurante Chapelão",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js && node --check scripts/testar-loja.js && node --check scripts/testar-taxa.js",
+    "start": "node src/start.js",
+    "dev": "node --watch src/start.js",
+    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js && node --check scripts/testar-loja.js && node --check scripts/testar-taxa.js && node --check src/central/server.js && node --check src/central/engine.js && node --check src/central/database.js && node --check src/central/worker-main.js && node --check src/central/agent.js && node --check scripts/central-db.js && node --check scripts/central-admin.js && node --check src/central/storage.js && node --check scripts/central-storage.js",
     "test:precos": "node scripts/testar-precos.js",
     "test:modelo": "node scripts/testar-modelo.js",
     "test": "npm run test:precos && npm run test:modelo && npm run test:loja && npm run test:pix && npm run test:taxa && npm run test:agrupamento && npm run test:entendimento && npm run test:intencao && npm run test:tools && npm run test:followup && npm run test:fluxo && npm run test:fumaca",
@@ -19,22 +19,32 @@
     "test:tools": "node scripts/testar-tools.js",
     "test:followup": "node scripts/testar-followup.js",
     "test:fluxo": "node scripts/testar-fluxo.js",
-    "test:taxa": "node scripts/testar-taxa.js"
+    "test:taxa": "node scripts/testar-taxa.js",
+    "worker": "node src/central/worker-main.js",
+    "build:central": "tsc -p central/tsconfig.json && vite build --config central/vite.config.mjs",
+    "test:central": "node --test tests/central.test.js",
+    "preview:central": "node scripts/central-preview.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0",
-    "axios": "^1.7.0",
-    "dotenv": "^16.4.0",
-    "express": "^4.21.0",
-    "form-data": "^4.0.0",
-    "openai": "^6.19.0",
-    "uuid": "^10.0.0",
-    "ws": "^8.18.0"
+    "@supabase/supabase-js": "2.108.1",
+    "axios": "1.20.0",
+    "dotenv": "16.6.1",
+    "express": "4.22.3",
+    "form-data": "4.0.6",
+    "openai": "6.49.0",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "ws": "8.21.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "@electric-sql/pglite": "0.5.10",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.12.0"
   }
 }

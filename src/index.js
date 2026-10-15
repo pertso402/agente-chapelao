@@ -3,7 +3,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { v4: uuid } = require('uuid');
+const { randomUUID: uuid } = require('node:crypto');
 const logger = require('./logger');
 const {
   extrairMensagem, downloadMidia, enviarTexto, enviarMidia, manterDigitando, ehEcoDoBot, estadoInstancia,
@@ -1139,7 +1139,7 @@ async function pollar() {
 // inteiro em produção falhando com "decidirLoja is not defined" — a função
 // estava exportada no config mas faltava no require daqui. `node --check` só
 // valida sintaxe e não pega referência indefinida; só executar pega.
-if (require.main === module) {
+function startLegacy() {
   setInterval(pollar, 60_000);
 
   const PORT = process.env.PORT || 3000;
@@ -1156,7 +1156,10 @@ if (require.main === module) {
   });
 }
 
+if (require.main === module) startLegacy();
+
 module.exports = {
+  startLegacy,
   app, pollar, sincronizarLoja, pollarFollowups, pollarTravados, pollarTaxas,
   _testes: { agruparMensagem, despachar, ehConfirmacao },
 };
