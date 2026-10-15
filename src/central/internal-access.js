@@ -1,7 +1,8 @@
 "use strict";
-const { createHmac } = require("node:crypto");
+const { createHmac, createHash } = require("node:crypto");
 const proxyaddr = require("proxy-addr");
 const { assert, uuid, secretEqual } = require("./domain");
+const DEVICE_COOKIE = "cw_trusted_device";
 const COOKIE = "cw_internal_operator";
 const DAYS = 180;
 function createInternalAccess(config, pool) {
@@ -18,7 +19,21 @@ function createInternalAccess(config, pool) {
     createHmac("sha256", config.internalSessionSecret)
       .update(value)
       .digest("hex");
+  const cookieValue = (req, name) => (req.get("Cookie") || "").split(";").map(v => v.trim()).find(v => v.startsWith(name + "="))?.slice(name.length + 1);
+  const validDevice = (req) => {
+    const [payload, mac, ...extra] = (cookieValue(req, DEVICE_COOKIE) || "").split(".");
+    if (!payload || !mac || extra.length || !secretEqual(mac, signature("device:" + payload))) return false;
+    try {
+      const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+      return data.kind === "device" && Number.isFinite(data.expiresAt) && data.expiresAt > Date.now();
+    } catch { return false; }
+  };
   const checkNetwork = (req) => {
+    if (config.authMode === "trusted_device") {
+      assert(config.internalSessionSecret?.length >= 32, 503, "Acesso ainda não configurado.");
+      assert(validDevice(req), 403, "Abra o link de ativação da empresa neste aparelho para entrar pela primeira vez.");
+      return;
+    }
     assert(
       config.internalSessionSecret?.length >= 32 && allowed.length,
       503,
@@ -60,6 +75,17 @@ function createInternalAccess(config, pool) {
     "; Path=/; HttpOnly; SameSite=Strict" +
     (config.origin.startsWith("https://") ? "; Secure" : "");
   return {
+    enroll(req, res) {
+      assert(config.authMode === "trusted_device", 404, "Ativação não disponível.");
+      assert(req.get("Origin") === config.origin, 403, "Origem não autorizada.");
+      assert(config.internalSessionSecret?.length >= 32 && config.deviceEnrollmentHash?.length === 64, 503, "Ativação ainda não configurada.");
+      assert(Date.now() < config.deviceEnrollmentUntil, 403, "Este link expirou. Peça um novo link à gestão.");
+      const token = req.body?.token;
+      assert(typeof token === "string" && token.length >= 32 && token.length <= 256 && secretEqual(createHash("sha256").update(token).digest("hex"), config.deviceEnrollmentHash), 403, "Link de ativação inválido.");
+      const payload = Buffer.from(JSON.stringify({kind:"device",expiresAt:Date.now()+DAYS*86400000})).toString("base64url");
+      res.setHeader("Set-Cookie", DEVICE_COOKIE + "=" + payload + "." + signature("device:" + payload) + options + "; Max-Age=" + DAYS * 86400);
+      return {activated:true};
+    },
     trustProxy: proxies.length ? proxyaddr.compile(proxies) : false,
     checkNetwork,
     read,

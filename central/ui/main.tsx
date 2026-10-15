@@ -7,7 +7,7 @@ type Config = {
   publishableKey: string;
   restaurantId: string;
   demo: boolean;
-  authMode: "password" | "internal_network";
+  authMode: "password" | "internal_network" | "trusted_device";
 };
 type Me = { id: string; name: string; role: string };
 type Instance = {
@@ -164,6 +164,9 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
     </svg>
   );
 }
+// Activation credentials stay in the fragment, never query strings or referrers.
+let activationToken = new URLSearchParams(window.location.hash.slice(1)).get("activate");
+if (activationToken) window.history.replaceState(null, "", window.location.pathname + window.location.search);
 function App() {
   const [config, setConfig] = useState<Config | null>(null),
     [client, setClient] = useState<SupabaseClient | null>(null),
@@ -212,7 +215,7 @@ function App() {
     scroll = useRef<HTMLDivElement | null>(null),
     selectedId = useRef<string | null>(null);
   const logout = useCallback(async () => {
-    if (config?.authMode === "internal_network") {
+    if (config && config.authMode !== "password") {
       const response = await fetch("/api/internal/logout", { method: "POST" });
       if (!response.ok) {
         setError(
@@ -235,7 +238,7 @@ function App() {
       .then((r) => r.json())
       .then((c: Config) => {
         setConfig(c);
-        if (c.authMode === "internal_network") return;
+        if (c.authMode !== "password") return;
         if (c.demo) {
           setToken("demo");
           return;
@@ -257,10 +260,15 @@ function App() {
       );
   }, []);
   useEffect(() => {
-    if (config?.authMode !== "internal_network" || token) return;
+    if (!config || config.authMode === "password" || token) return;
     let active = true;
     setInternalLoading(true);
-    fetch("/api/internal/access")
+    const activate = activationToken;
+    activationToken = null;
+    const ready = activate ? fetch("/api/internal/enroll", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({token:activate})
+    }).then(async r => { const v=await r.json(); if(!r.ok) throw new Error(v.error || "Não foi possível ativar este aparelho."); }) : Promise.resolve();
+    ready.then(() => fetch("/api/internal/access"))
       .then(async (r) => {
         const v = await r.json();
         if (!r.ok) throw new Error(v.error || "Acesso interno indisponível.");
@@ -469,7 +477,7 @@ function App() {
     refresh();
     const t = setInterval(
       refresh,
-      config?.authMode === "internal_network" ? 1500 : 30000,
+      config && config.authMode !== "password" ? 1500 : 30000,
     );
     const focus = () => {
       if (!document.hidden) refresh();
@@ -488,7 +496,7 @@ function App() {
       setConnection("Demonstração local");
       return;
     }
-    if (config.authMode === "internal_network") {
+    if (config.authMode !== "password") {
       setConnection("Atualização automática");
       return;
     }
@@ -646,7 +654,7 @@ function App() {
         Carregando a central…{error && <p role="alert">{error}</p>}
       </div>
     );
-  if (!token && config.authMode === "internal_network")
+  if (!token && config.authMode !== "password")
     return (
       <main className="internal-entry">
         <section className="internal-card">
@@ -703,7 +711,7 @@ function App() {
             </div>
           )}
           <small>
-            Acesso restrito à rede do restaurante · Sem e-mail e senha
+            Acesso salvo neste aparelho · Sem e-mail e senha
           </small>
           {config.demo && (
             <p className="demo-caption">
@@ -886,8 +894,8 @@ function App() {
           </span>
           <button
             className="icon-button"
-            title={config.authMode === "internal_network" ? "Trocar pessoa" : "Sair"}
-            aria-label={config.authMode === "internal_network" ? "Trocar pessoa" : "Sair"}
+            title={config.authMode !== "password" ? "Trocar pessoa" : "Sair"}
+            aria-label={config.authMode !== "password" ? "Trocar pessoa" : "Sair"}
             onClick={logout}
           >
             <Icon name="logout" />

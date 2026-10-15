@@ -25,8 +25,8 @@ function configuration(env = process.env) {
   return {
     restaurantId: IDS.restaurant,
     authMode:
-      env.CENTRAL_AUTH_MODE === "internal_network"
-        ? "internal_network"
+      ["internal_network", "trusted_device"].includes(env.CENTRAL_AUTH_MODE)
+        ? env.CENTRAL_AUTH_MODE
         : "password",
     internalAllowedCidrs: (env.CENTRAL_ALLOWED_CIDRS || "")
       .split(",")
@@ -36,6 +36,8 @@ function configuration(env = process.env) {
       .split(",")
       .map((v) => v.trim())
       .filter(Boolean),
+    deviceEnrollmentHash: env.CENTRAL_ENROLLMENT_HASH || "",
+    deviceEnrollmentUntil: Number(env.CENTRAL_ENROLLMENT_UNTIL || 0),
     internalSessionSecret: env.CENTRAL_SESSION_SECRET || "",
     origin: env.APP_ORIGIN || "http://localhost:3000",
     supabaseUrl: env.SUPA_URL || "https://qlswjefuinhbtlhauhgj.supabase.co",

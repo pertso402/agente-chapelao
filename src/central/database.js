@@ -1,5 +1,7 @@
 "use strict";
 const { Pool } = require("pg");
+const fs = require("node:fs");
+const path = require("node:path");
 const { HttpError } = require("./domain");
 function createDatabase(url = process.env.DATABASE_URL) {
   if (!url)
@@ -10,13 +12,19 @@ function createDatabase(url = process.env.DATABASE_URL) {
     throw new Error(
       "Locks de sessão não podem usar o pool transacional (6543).",
     );
+  const target = new URL(url);
+  const isSupabase = /(?:^|\.)supabase\.co$|(?:^|\.)pooler\.supabase\.com$/.test(target.hostname);
+  const ca = process.env.DATABASE_CA_CERT ||
+    (isSupabase ? fs.readFileSync(path.join(__dirname, "../../certificates/supabase-root-ca.crt"), "utf8") : "");
+  // pg reparses sslmode; remove URL TLS parameters when supplying an explicit CA.
+  if (ca) for (const key of ["sslmode", "sslcert", "sslkey", "sslrootcert"]) target.searchParams.delete(key);
   const pool = new Pool({
-    connectionString: url,
+    connectionString: ca ? target.toString() : url,
     max: 6,
     connectionTimeoutMillis: 8000,
     idleTimeoutMillis: 30000,
-    ...(process.env.DATABASE_CA_CERT
-      ? { ssl: { ca: process.env.DATABASE_CA_CERT, rejectUnauthorized: true } }
+    ...(ca
+      ? { ssl: { ca, rejectUnauthorized: true } }
       : {}),
   });
   pool.on("error", () =>

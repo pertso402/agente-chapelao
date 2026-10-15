@@ -825,3 +825,31 @@ test("modo interno bloqueia rede não autorizada e não confia em X-Forwarded-Fo
     (e) => e.status === 503,
   );
 });
+
+test("aparelho ativado entra sem IP; link inválido e cookies adulterados não liberam dados", async (t) => {
+  const s=await setup(); t.after(()=>s.pool.end());
+  const {createHash}=require("node:crypto");
+  const activation="t".repeat(48);
+  Object.assign(s.config,{authMode:"trusted_device",internalSessionSecret:"s".repeat(64),deviceEnrollmentHash:createHash("sha256").update(activation).digest("hex"),deviceEnrollmentUntil:Date.now()+60000});
+  const {app}=createApp({...s}); const server=app.listen(0,"127.0.0.1");
+  await new Promise(r=>server.once("listening",r)); t.after(()=>new Promise(r=>server.close(r)));
+  const base="http://127.0.0.1:"+server.address().port;
+  for(const route of ["/api/internal/access","/api/me","/api/conversations"])
+    assert.equal((await fetch(base+route)).status,403);
+  const enroll=(token,origin=s.config.origin)=>fetch(base+"/api/internal/enroll",{method:"POST",headers:{"Content-Type":"application/json",Origin:origin},body:JSON.stringify({token})});
+  assert.equal((await enroll(activation,"https://evil.example")).status,403);
+  assert.equal((await enroll("x".repeat(48))).status,403);
+  const result=await enroll(activation); assert.equal(result.status,200);
+  const device=result.headers.get("set-cookie").split(";")[0];
+  assert.ok(result.headers.get("set-cookie").includes("HttpOnly"));
+  assert.equal((await (await fetch(base+"/api/internal/access",{headers:{Cookie:device}})).json()).members.length,3);
+  const choice=await fetch(base+"/api/internal/select",{method:"POST",headers:{"Content-Type":"application/json",Origin:s.config.origin,Cookie:device},body:JSON.stringify({userId:USERS.alice})});
+  assert.equal(choice.status,200);
+  const cookie=device+"; "+choice.headers.get("set-cookie").split(";")[0];
+  assert.equal((await fetch(base+"/api/me",{headers:{Cookie:cookie}})).status,200);
+  // Knowing only an operator cookie cannot bypass device authorization.
+  assert.equal((await fetch(base+"/api/me",{headers:{Cookie:choice.headers.get("set-cookie").split(";")[0]}})).status,403);
+  s.config.deviceEnrollmentUntil=0; assert.equal((await enroll(activation)).status,403);
+  assert.equal((await fetch(base+"/api/me",{headers:{Cookie:cookie}})).status,200);
+  s.config.internalSessionSecret="z".repeat(64); assert.equal((await fetch(base+"/api/me",{headers:{Cookie:cookie}})).status,403);
+});

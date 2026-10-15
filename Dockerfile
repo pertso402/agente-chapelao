@@ -11,6 +11,7 @@ ENV PORT=3000
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src/ ./src/
+COPY certificates/ ./certificates/
 COPY --from=build /app/central/public ./central/public
 USER node
 EXPOSE 3000

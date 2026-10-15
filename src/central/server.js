@@ -18,7 +18,7 @@ function createApp({
   const app = express(),
     engine = new Engine({ pool, config, evolution });
   const internal =
-    config.authMode === "internal_network"
+    ["internal_network", "trusted_device"].includes(config.authMode)
       ? require("./internal-access").createInternalAccess(config, pool)
       : null;
   if (internal) app.set("trust proxy", internal.trustProxy);
@@ -56,6 +56,7 @@ function createApp({
   const asyncRoute = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res)).catch(next);
   if (internal) {
+    app.post("/api/internal/enroll", express.json({limit:"2kb",strict:true}), asyncRoute(async(req,res)=>res.json(internal.enroll(req,res))));
     app.get(
       "/api/internal/access",
       asyncRoute(async (req, res) => res.json(await internal.access(req))),
