@@ -853,3 +853,22 @@ test("aparelho ativado entra sem IP; link inválido e cookies adulterados não l
   assert.equal((await fetch(base+"/api/me",{headers:{Cookie:cookie}})).status,200);
   s.config.internalSessionSecret="z".repeat(64); assert.equal((await fetch(base+"/api/me",{headers:{Cookie:cookie}})).status,403);
 });
+
+test("oferta enviada externamente não cria chamado nem reabre conversa encerrada", async (t) => {
+  const s=await setup();t.after(()=>s.pool.end());
+  const initial=await ingest(s,IDS.secondary,payload("oferta1","Oferta de hoje",true).data);
+  assert.equal(initial.state,"closed");
+  assert.equal((await s.pool.query("select id from cw_handoffs")).rows.length,0);
+  assert.equal((await s.pool.query("select id from cw_private.jobs where type='ai'")).rows.length,0);
+  await ingest(s,IDS.secondary,payload("resposta1","Tenho interesse").data);
+  const waiting=await s.engine.context(s.pool,initial.id);
+  assert.equal(waiting.state,"waiting_human");
+  assert.equal(waiting.cycle,2);
+  await s.engine.command(USERS.alice,initial.id,"claim",{},randomUUID());
+  await s.engine.command(USERS.alice,initial.id,"close",{},randomUUID());
+  await ingest(s,IDS.secondary,payload("oferta2","Nova oferta",true).data);
+  const closed=await s.engine.context(s.pool,initial.id);
+  assert.equal(closed.state,"closed");
+  assert.equal(closed.cycle,2);
+  assert.equal((await s.pool.query("select id from cw_handoffs where status in ('pending','claimed')")).rows.length,0);
+});

@@ -497,14 +497,14 @@ class Engine {
         ).rows[0];
         assert(inst, 404, "Instância não cadastrada.");
         await q.query(
-          "insert into cw_conversations(restaurant_id,instance_id,chat_jid,customer_name,phone,state) values($1,$2,$3,$4,$5,$6) on conflict(instance_id,chat_jid) do nothing",
+          "insert into cw_conversations(restaurant_id,instance_id,chat_jid,customer_name,phone,state,closed_at) values($1,$2,$3,$4,$5,$6,case when $6='closed' then now() else null end) on conflict(instance_id,chat_jid) do nothing",
           [
             inst.restaurant_id,
             inst.id,
             msg.jid,
             msg.name,
             msg.phone,
-            inst.ai_enabled ? "ai" : "waiting_human",
+            msg.fromMe ? "closed" : inst.ai_enabled ? "ai" : "waiting_human",
           ],
         );
         let c = (
@@ -555,11 +555,10 @@ class Engine {
             await this.audit(q, c, null, "external_reply_during_human");
             return;
           }
-          if (c.state === "closed")
-            await q.query(
-              "update cw_conversations set state='ai',closed_at=null where id=$1",
-              [c.id],
-            );
+          if (c.state === "closed") {
+            await this.audit(q, c, null, "external_outbound_while_closed");
+            return; // Disparos de oferta não representam um pedido de ajuda do cliente.
+          }
           c = await this.context(q, c.id);
           await this.handoff(
             q,

@@ -1,178 +1,178 @@
 # Central de atendimento Chapelão
 
-Implementação local a partir de especificacao-central-whatsapp.md, no repositório agente-chapelao. Data: 15/10/2026, fuso America/Sao_Paulo.
+Implementação baseada em especificacao-central-whatsapp.md, integrada ao repositório agente-chapelao. Instalação: 15/10/2026, America/Sao_Paulo.
 
-## Entrada interna, sem e-mail ou senha
+## Instalação e comportamento
 
-Conforme solicitado, o modo de implantação desta empresa é CENTRAL_AUTH_MODE=internal_network. A central só libera dados e comandos quando a origem está na lista de IPs/redes autorizadas. Na primeira abertura, a atendente escolhe o nome; um cookie assinado, HttpOnly e SameSite=Strict guarda a identificação por 180 dias. Depois, basta abrir o endereço. “Trocar pessoa” permite usar outro nome no mesmo computador.
+Painel: https://agente-central-chapelao.b1h6rm.easypanel.host/
 
-Essa escolha identifica o responsável pelo atendimento; não é uma autenticação individual. Dentro da rede autorizada é possível escolher qualquer perfil ativo. Os papéis dos perfis continuam registrados no banco. Por isso a restrição precisa usar o IP público real do restaurante e os proxies confiáveis corretos do Easypanel. Sem rede/segredo configurados, o backend nega acesso. Não liberar 0.0.0.0/0, não confiar indiscriminadamente em X-Forwarded-For e não expor a porta do contêiner de forma a contornar o proxy.
+No projeto agente do Easypanel foram criados central-chapelao (web/backend na porta 3000, HTTPS) e central-worker (processo persistente, sem domínio público). Ambos usam o mesmo código e banco. O agente-chapelao anterior foi desativado e preservado para recuperação. Os serviços dos outros restaurantes não foram alterados.
 
-Variáveis novas:
+A migração 20261015064518_central_whatsapp.sql foi aplicada ao Supabase. Ela criou os objetos cw_* e cw_private, após inventário remoto; não alterou cardápio, pedidos ou clientes existentes. O bucket cw-media foi criado como privado. A conexão usa o pool de sessão 5432 com certificado oficial Supabase e verificação TLS; não usa pool transacional nem desativa validação de certificado.
+
+| Instância | Evolution | Recebimento |
+| --- | --- | --- |
+| Principal | Chapela - atendimento | Central, com segredo próprio |
+| Secundário | chapelao | Central, com outro segredo |
+
+Ambos têm os eventos MESSAGES_UPSERT, MESSAGES_UPDATE, SEND_MESSAGE e CONNECTION_UPDATE, byEvents=false e base64=false. O webhook global da instalação Evolution está desabilitado. A imagem observada foi evoapicloud/evolution-api:v2.3.7.
+
+Conforme decisão do responsável, o webhook de recompra do secundário foi substituído. O servidor Vercel que dispara ofertas e suas credenciais não foram alterados. Os disparos iniciais continuam sob responsabilidade desse serviço. A resposta ao convite deixa de disparar automaticamente o vídeo do buffet pelo webhook antigo e passa ao atendimento da equipe. Não foi executado disparo real de oferta como teste.
+
+Saídas externas, como ofertas enviadas pelo serviço de recompra, ficam registradas quando notificadas pela Evolution. Uma saída para cliente sem atendimento aberto não gera chamado, não agenda IA e não reabre conversa encerrada. A próxima mensagem recebida do cliente abre o atendimento. Em conversa ativa com IA, uma resposta externa suspende o controle automático para conferência humana.
+
+## Entrada sem e-mail, senha ou IP fixo
+
+Esta instalação usa CENTRAL_AUTH_MODE=trusted_device. O link de ativação autoriza o navegador na primeira abertura. Depois, a pessoa escolhe Atendimento 1, Atendimento 2 ou Gestão; a escolha fica salva por até 180 dias. “Trocar pessoa” permite mudar a identificação no mesmo computador. Não existe restrição por IP.
+
+O link fica no arquivo privado ACESSO-CENTRAL.md, fora do repositório e do ZIP de código. Ele utiliza fragmento #activate=..., removido da barra imediatamente, e expira inicialmente em sete dias. Não é enviado em query strings ou referrers. O servidor armazena somente seu hash SHA-256. Aparelhos já ativados continuam autorizados após o vencimento do link.
+
+Cookies são assinados, HttpOnly, SameSite=Strict e Secure em HTTPS. A API exige o cookie do aparelho além da identificação do operador; comandos verificam a origem. Acesso direto sem autorização recebe 403. Limpar cookies ou usar navegação anônima exige ativação novamente.
+
+O link concede acesso aos perfis da empresa, inclusive Gestão. A escolha do nome identifica quem está operando; não comprova identidade individual. Compartilhar o link somente com a equipe. Para revogar todos os aparelhos, trocar CENTRAL_SESSION_SECRET e gerar um novo link/hash. Para deixar de autorizar novos aparelhos, vencer CENTRAL_ENROLLMENT_UNTIL.
+
+Perfis criados com autorização explícita:
+
+| Perfil | Papel |
+| --- | --- |
+| Atendimento 1 | attendant |
+| Atendimento 2 | attendant |
+| Gestão | admin |
+
+Os registros técnicos no Supabase Auth usam endereços aleatórios @internal.invalid e senhas aleatórias, sem envio de convite. A equipe não usa essas credenciais. Membership e atividade são conferidas a cada ação. O modo opcional password permanece disponível; não está selecionado.
+
+## Operação da equipe
+
+1. Abrir a central; na primeira vez, usar o link de ativação.
+2. Escolher o perfil e clicar em Abrir central. O navegador lembra a escolha.
+3. Clicar em Ativar som em cada estação que deve emitir alerta.
+4. Selecionar o chamado, ler o motivo e o histórico, e clicar em Assumir.
+5. Enviar a mensagem e acompanhar seu status no histórico.
+6. Devolver à fila, transferir, devolver à IA ou encerrar explicitamente.
+
+A conversa continua humana mesmo após sair do painel, recarregar ou esperar. Encerrar termina o ciclo atual; nova mensagem do cliente pode abrir outro. Ativar IA de uma instância não tira chamados existentes da fila. Devolver à IA aguarda a próxima mensagem, sem responder novamente a perguntas antigas.
+
+A área Operação e instâncias mostra IA por número, situação de jobs, mensagens incertas e acesso da equipe. Desativar um membro devolve suas conversas e cancela saídas pendentes na mesma transação. Envios humanos incertos exigem resolução antes de encerrar, transferir ou desativar o responsável.
+
+## IA compartilhada e limites
+
+src/central/agent.js compartilha as ferramentas de leitura buscar_itens_do_dia, buscar_cardapio e info_restaurante do sistema existente. As duas instâncias usam esse mesmo adaptador, com histórico separado por conversa e ciclo.
+
+O modelo gpt-4o foi verificado como disponível com a chave já existente no Easypanel. Um teste consultou o horário do restaurante e obteve uma resposta, sem envio para WhatsApp.
+
+Nesta versão, a IA consulta o catálogo e informações gerais. Pedidos, alterações, pagamentos, reclamações e mídia são encaminhados para pessoas. Ela não grava pedido, não aprova pagamento e não executa ferramentas de cupons/cancelamentos do agente legado. O legado armazenava sessões por telefone; reutilizá-las misturaria o contexto dos dois números.
+
+O adaptador retorna reply, handoff ou no_action. Não envia diretamente à Evolution. Falha do modelo gera encaminhamento humano. A configuração operacional de IA por instância deve ser conferida no painel; não é inferida apenas do WhatsApp estar conectado.
+
+## Isolamento e coordenação
+
+- A identidade da conversa é instance_id + chat_jid. O mesmo cliente nos dois números tem dois históricos.
+- Todas as tarefas e mensagens têm restaurante e instância; chaves estrangeiras compostas impedem misturar origens.
+- O servidor deriva o destino da conversa registrada. Navegador e modelo não escolhem número de envio.
+- Webhooks exigem segredo e correspondência do nome da instância. Só recebem 2xx após commit do job.
+- Jobs Postgres usam SKIP LOCKED, leases renováveis, tentativas limitadas e quarentena.
+- Estado, ciclos, responsável e epochs são persistidos. Gerações antigas são invalidadas antes de gravar e antes de enviar.
+- Locks de sessão são adquiridos na ordem instância, conversa. Pausa global usa lock exclusivo da instância.
+- O POST de envio mantém a barreira de coordenação, sem manter transação SQL aberta durante a rede.
+- Timeout ou queda com entrega ambígua resulta em unknown. Não existe reenvio cego.
+- Comandos usam Idempotency-Key e auditoria; disputa para assumir retorna 409.
+- Status de entrega fora de ordem não rebaixa mensagens já lidas.
+- RLS e grants impedem leitura anônima e escrita direta pelo navegador. No modo por aparelho, o painel usa apenas o backend, com atualização a cada 1,5 segundo.
+
+O agente legado e seus pollers não são carregados com CENTRAL_ENABLED=true. Não religar o serviço antigo enquanto o worker central estiver respondendo aos mesmos números.
+
+O serviço de ofertas Vercel continua como emissor externo. Ele não foi migrado para a outbox da central nesta entrega. A central registra seus eventos como external; campanhas devem respeitar o atendimento humano em andamento.
+
+## Mídia e identificadores
+
+A API recupera mídia pela chave da mensagem, com autenticação da atendente e limite de 8 MB. Preserva cópia no bucket privado cw-media, em caminho com restaurante, instância, conversa e mensagem. Leituras seguintes usam essa cópia. Não há URLs públicas permanentes ou download por URL arbitrária.
+
+Imagens/áudios permitidos são exibidos; outros formatos são baixados sem execução. A recuperação de anexo real ainda precisa de teste operacional. A retenção de anexos deve ser definida pela empresa.
+
+JID @lid não é convertido em telefone. O mapeamento de identificadores alternativos não foi confirmado no ambiente real; conversas não são fundidas por nome ou semelhança. Importação de histórico não está habilitada. A central começa a receber eventos a partir do corte; conversas antigas do agente não foram importadas.
+
+## Código e configuração
+
+| Arquivo | Responsabilidade |
+| --- | --- |
+| src/start.js | Seleção entre central e legado |
+| src/central/server.js | API, autorização e webhook |
+| src/central/internal-access.js | Ativação do aparelho e identificação salva |
+| src/central/engine.js | Estados, transações, jobs e despacho |
+| src/central/database.js | Pool, TLS e locks |
+| src/central/evolution.js | Eventos e transporte por instância |
+| src/central/agent.js | Adaptador da IA |
+| src/central/storage.js | Anexos privados |
+| central/ui/ | Painel React/TypeScript |
+| supabase/migrations/ | Schema, RLS, índices e dados iniciais |
+| .env.central.example | Exemplo sem segredos |
+
+O painel usa React/TypeScript com Vite servido por Express, aproveitando o repositório existente. Backend e worker exigem Node persistente; não são funções que encerram após a requisição HTTP.
+
+Variáveis principais:
 
 ```env
-CENTRAL_AUTH_MODE=internal_network
-CENTRAL_ALLOWED_CIDRS=<ip-publico-do-restaurante>/32
-CENTRAL_TRUST_PROXY_CIDRS=<rede-do-proxy-Traefik-confirmada>
-CENTRAL_SESSION_SECRET=<segredo-aleatorio-com-pelo-menos-32-caracteres>
+CENTRAL_ENABLED=true
+CENTRAL_AUTH_MODE=trusted_device
+CENTRAL_SESSION_SECRET=<segredo-aleatorio>
+CENTRAL_ENROLLMENT_HASH=<sha256-do-token-de-ativacao>
+CENTRAL_ENROLLMENT_UNTIL=<validade-do-link-em-milisegundos-unix>
+APP_ORIGIN=https://agente-central-chapelao.b1h6rm.easypanel.host
+PORT=3000
+DATABASE_URL=<conexao-postgres-de-sessao-5432-com-TLS>
+SUPA_URL=https://qlswjefuinhbtlhauhgj.supabase.co
+SUPA_SERVICE_KEY=<somente-servidor>
+OPENAI_API_KEY=<somente-servidor>
+OPENAI_MODEL=gpt-4o
+EVOLUTION_PRIMARY_KEY=<somente-servidor>
+EVOLUTION_SECONDARY_KEY=<somente-servidor>
+WEBHOOK_PRIMARY_SECRET=<segredo-proprio>
+WEBHOOK_SECONDARY_SECRET=<outro-segredo>
 ```
 
-O webhook Evolution continua acessível externamente com seu próprio segredo; a restrição da rede aplica-se ao painel e às APIs das atendentes. Ela não bloqueia a chegada dos eventos do WhatsApp.
+SUPA_KEY só é necessária no modo opcional password. As chaves privadas, DATABASE_URL e link de ativação não entram no Git/ZIP. O certificado público Supabase encontra-se em certificates/supabase-root-ca.crt. DATABASE_CA_CERT permite fornecer outra CA explícita, mantendo rejectUnauthorized=true.
 
-No modo interno, o navegador lê o backend com o cookie e consulta atualizações a cada 1,5 segundo. A chave publicável e o JWT Supabase do usuário não são necessários no navegador. O banco continua com RLS/grants fechados para acesso anônimo. O modo password permanece disponível por configuração para uma futura necessidade de acesso individual externo; ele não é o modo selecionado para o restaurante.
-
-Cadastrar a equipe sem pedir endereços de e-mail:
-
-```sh
-node scripts/central-operator.js "Ana" attendant
-node scripts/central-operator.js "Gestão" admin
-```
-
-O script usa o segredo administrativo do Supabase para criar identificadores técnicos aleatórios, sem enviar convite e sem entregar credenciais à equipe. Não executar a central com perfis fictícios da demonstração em produção.
-
-## Situação da entrega
-
-O código implementa painel React/TypeScript, entrada interna por rede, API Express, worker Node persistente e migração Supabase com RLS. **Ainda não foi aplicado ao Supabase nem publicado no Easypanel.** Nenhum webhook real foi redirecionado e nenhuma mensagem foi enviada aos clientes durante o desenvolvimento.
-
-O agente atual permanece como padrão de inicialização. A central só inicia com CENTRAL_ENABLED=true. A versão legada e seus pollers não são carregados nesse modo. Não execute o agente legado em outro contêiner respondendo aos mesmos números após o corte.
-
-Aproveitou-se o Express do repositório existente em vez de adicionar Next.js. O painel React/TypeScript é compilado por Vite e servido pelo mesmo backend. As transações e os locks de sessão exigem processos Node persistentes; esta implementação não usa hospedagem Sites/Cloudflare Workers.
-
-## Ambiente identificado
-
-| Item                          | Valor / resultado verificado                                                                   |
-| ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| Supabase                      | https://qlswjefuinhbtlhauhgj.supabase.co                                                       |
-| Chave publicável recebida     | A consulta autenticada à Data API recebeu HTTP 401; precisa ser conferida                      |
-| Plugin Supabase               | Sem ferramentas administrativas disponíveis nesta sessão, inclusive após a reconexão informada |
-| Evolution                     | https://assistente-evolution-api.b1h6rm.easypanel.host                                         |
-| Versão observada da Evolution | 2.3.7, informada pelo endpoint raiz                                                            |
-| Instância principal           | Chapela - atendimento; conexão open                                                            |
-| Instância secundária          | chapelao; conexão open                                                                         |
-| Webhooks atuais               | Habilitados nas duas instâncias, somente MESSAGES_UPSERT, byEvents=false                       |
-| Agente atual                  | https://agente-agente-chapelao.b1h6rm.easypanel.host                                           |
-| Repositório de origem         | https://github.com/pertso402/agente-chapelao                                                   |
-
-As consultas foram somente leitura. O retorno atual de configuração não confirmou headers de autenticação; ausência desse campo na resposta não prova ausência de suporte. Validar headers na versão instalada antes do corte. Se necessário, usar gateway autenticado. Nunca remover a autenticação do endpoint para contornar isso.
-
-## O que está implementado
-
-- Conversas identificadas por instância + JID, com histórico, ciclo, responsável e epochs persistidos.
-- Identificação permanente do WhatsApp de origem; navegador envia texto, nunca escolhe destino.
-- Recebimento autenticado que só confirma após gravar o job durável; duplicatas não repetem mensagens ou efeitos.
-- Estados ai, waiting_human, human e closed. Controle humano não expira por tempo, reload ou logout.
-- Assumir, devolver à fila, devolver à IA, encerrar e transferir, com idempotência e auditoria.
-- Configuração da IA por número; reativação não retoma trabalhos antigos nem remove chamados da fila.
-- Fila Postgres com leases, SKIP LOCKED, renovação, retentativas limitadas e quarentena.
-- Locks de sessão: instância antes da conversa. Pausa global usa lock exclusivo da instância.
-- Snapshot de versão conferido depois da geração e antes do despacho. Modelo fora do lock; POST externo dentro da barreira de coordenação, sem transação SQL aberta durante a rede.
-- Status real de outbox, tratamento unknown sem retry cego e resolução explícita auditada por administrador.
-- Entrada direta na rede autorizada, escolha persistida do nome e membership revalidada no backend; RLS sem escrita direta do browser. Login Supabase permanece apenas no modo opcional password.
-- Admin pode desativar/reativar membros. Desativação devolve suas conversas e cancela mensagens pendentes na mesma transação, além de remover sessões Auth. Envios humanos incertos bloqueiam a operação até conferência.
-- Painel em português, filas, busca, filtro por número, histórico paginado, mídia com autenticação e rascunho preservado em erro de envio.
-- Realtime para atualização e snapshot periódico de 30 segundos como recuperação; alerta sonoro ativado por clique, com aba líder via Web Locks em navegadores compatíveis.
-- Página de operação com estado das instâncias, jobs atrasados/falhos/quarentena e mensagens incertas.
-
-## Integração da IA e limites operacionais
-
-O adaptador em src/central/agent.js compartilha as ferramentas existentes buscar_itens_do_dia, buscar_cardapio e info_restaurante. Ele usa exclusivamente o histórico da conversa e do ciclo atual.
-
-**O piloto da central mantém as ferramentas de pedidos, pagamentos, cupons e cancelamentos fora do alcance da IA.** A equipe humana finaliza essas ações no sistema existente. O agente legado grava rascunhos e histórico por telefone; reutilizá-lo sem adaptação misturaria as sessões dos dois números. Não houve migração ou duplicação de tabelas de negócio.
-
-O adaptador retorna reply, handoff ou no_action. Não envia diretamente à Evolution. OPENAI_MODEL é obrigatório no worker: use um modelo compatível validado na conta. A disponibilidade e o custo desse modelo não foram testados, pois a chave OpenAI não foi fornecida nesta sessão. Falha do modelo resulta em fila humana.
-
-Devolver à IA espera a próxima mensagem do cliente, evitando resposta extra a perguntas antigas. O limite de duas perguntas de esclarecimento é conservador: não é zerado por uma inferência do modelo sobre progresso.
-
-Mídia é recuperada da Evolution por chave da mensagem, mediante autenticação da atendente, com limite de 8 MB. Imagens e áudios permitidos podem ser exibidos; outros tipos são baixados sem execução. Ao abrir um anexo pela primeira vez, o backend preserva uma cópia no bucket privado cw-media, usando caminho com restaurante/instância/conversa/mensagem; leituras seguintes usam essa cópia. O bucket precisa ser criado com node scripts/central-storage.js. Não foram executadas criação do bucket, recuperação real ou validação de mídia nesta sessão. A política de retenção ainda precisa ser definida. Não há download por URL arbitrária.
-
-JIDs @lid permanecem separados e não são tratados como telefone. O mapeamento de JID alternativo, importação de histórico, reconciliação sem ID do provedor e preservação de mídia não foram validados no ambiente real. Um eco sem associação e com envio incerto é colocado em quarentena para revisão; o sistema não atribui autoria por texto/horário.
-
-## Arquivos principais
-
-| Caminho                                                 | Uso                                             |
-| ------------------------------------------------------- | ----------------------------------------------- |
-| src/central/server.js                                   | Autenticação, leitura, comandos e webhook       |
-| src/central/engine.js                                   | Transações, máquina de estados, fila e despacho |
-| src/central/database.js                                 | Pool e locks com liberação em finally           |
-| src/central/evolution.js                                | Normalização e transporte por instância         |
-| src/central/agent.js                                    | Adaptador de IA e ferramentas de leitura        |
-| central/ui/                                             | Interface React/TypeScript                      |
-| supabase/migrations/20261015064518_central_whatsapp.sql | Schema, índices, grants, RLS e Realtime         |
-| tests/central.test.js                                   | Verificação funcional local                     |
-| scripts/central-db.js                                   | Inventário e aplicação explícita da migração    |
-| scripts/central-admin.js                                | Associação de conta Auth já convidada           |
-| scripts/central-probe.js                                | Diagnóstico de leitura, sem mensagens           |
-| .env.central.example                                    | Variáveis necessárias; sem segredos reais       |
-
-O prefixo cw_ e o schema cw_private separam a central dos objetos existentes. O SQL falha se os mesmos objetos já existirem, em vez de sobrescrevê-los. cw_private não deve ser exposto pela Data API. As tabelas de negócio já existentes não foram inspecionadas remotamente por falta de acesso administrativo; execute o inventário antes da migração.
-
-## Rodar e conferir localmente
-
-Requer Node 24 LTS ou versão compatível >=22.12.
+Para desenvolvimento:
 
 ```sh
 npm ci
 npm run build:central
 npm run test:central
+npm run check
 npm test
 npm run preview:central
 ```
 
-A demonstração abre em http://localhost:3000 e tem botão próprio. Ela usa Postgres embarcado em memória, contas e dados fictícios, sem ler .env e sem chamar serviços reais. Não é um modo de autenticação do serviço de produção.
+A prévia localhost:3000 usa banco em memória e dados fictícios, sem ler .env ou conectar números reais. O serviço de produção não permite autenticação de demonstração.
 
-Para a instalação real, configure segredos no Easypanel seguindo .env.central.example. DATABASE_URL deve ser conexão direta ou pool em modo de sessão; porta transacional 6543 é rejeitada. Verificação TLS não é desativada. A conexão privilegiada deve alcançar somente o backend/worker.
+## Verificação realizada
 
-## Preparação do banco e da equipe
+- Compilação TypeScript/Vite e verificação de sintaxe.
+- Suíte funcional da central, incluindo RLS, isolamento, idempotência, assunção, descarte de IA obsoleta, mídia autenticada, envios incertos, revogação e acesso por aparelho.
+- Os 12 grupos de testes existentes passaram, com 121 verificações.
+- npm audit retornou zero vulnerabilidades na revisão das dependências.
+- PostgreSQL real: TLS validado e exclusão entre duas sessões para a mesma conversa.
+- Supabase real: migração aplicada, oito tabelas públicas com RLS, equipe criada e bucket privado.
+- Easypanel: painel e worker ativos; ambos os WhatsApps reportaram open.
+- HTTPS real: dados negados sem cookie; ativação, identificação e comandos autenticados testados.
+- Navegador: entrada sem e-mail/senha, persistência após reload e painel de operação.
+- Webhooks reais configurados e relidos, com conferência dos dois segredos.
+- Evento sintético de conexão recebido, gravado e concluído pelo worker para cada instância; nenhuma mensagem foi enviada para cliente nesse teste.
 
-1. Confirmar acesso administrativo ao projeto e backup recuperável. Conferir schema e tabelas já existentes com node scripts/central-db.js inspect.
-2. Aplicar a migração revisada: node scripts/central-db.js apply. Isso cria somente os objetos da central e inicia as duas instâncias com IA pausada.
-3. Criar o bucket privado com node scripts/central-storage.js. Executar os advisors de segurança e revisar grants/RLS no Supabase real. Eles não foram executados nesta sessão.
-4. Desativar cadastro público no Supabase Auth. No modo interno, cadastrar os nomes com scripts/central-operator.js. O script cria o vínculo técnico necessário, sem exigir e-mail ou senha da equipe.
-5. Para contas Auth já existentes, o script central-admin.js continua disponível. Para a instalação interna nova, usar central-operator.js com nome e papel.
-6. Conferir acesso pela rede do restaurante, bloqueio externo mesmo com cookie válido, proxy, persistência após recarregar, revogação de membro e negação de escrita anônima no Supabase.
+A suíte usa PGlite para SQL/RLS e serializa conexões, substituindo advisory locks. O teste adicional em PostgreSQL real valida exclusão entre duas sessões, mas não todos os cenários de concorrência sob falha de rede.
 
-Não usar a chave publicável para administração. SUPA_SERVICE_KEY, DATABASE_URL, chaves Evolution e chave OpenAI ficam somente no servidor. As credenciais recebidas foram guardadas em .env.central local ignorado pelo Git e excluído do pacote de código.
+Ainda falta a validação operacional com mensagens reais de entrada e resposta em cada número, anexos reais, todos os 28 cenários de aceite e ensaio de backup/restauração. Os advisors do plugin Supabase não foram executados porque suas ferramentas administrativas não estavam disponíveis nesta sessão. O acesso administrativo usado foi DSN de sessão e a chave de serviço já configurada no Easypanel.
 
-## Implantação no Easypanel
+## Recuperação
 
-Criar dois serviços a partir do mesmo commit/Dockerfile:
+Foram preservadas cópias privadas da configuração do agente anterior e dos webhooks. Elas contêm credenciais e não integram a entrega pública de código.
 
-| Serviço     | Comando                                 | Rede                                    |
-| ----------- | --------------------------------------- | --------------------------------------- |
-| Web/backend | node src/start.js, CENTRAL_ENABLED=true | Porta 3000, HTTPS no domínio do agente  |
-| Worker      | node src/central/worker-main.js         | Processo persistente, sem porta pública |
+Antes de voltar ao legado: pausar IA, conferir saídas pendentes/incertas e interromper o worker central. Restaurar os webhooks anteriores e só então reativar agente-chapelao. Não deixar dois agentes respondendo à mesma instância. Preservar as tabelas cw_* para conferência; recuperação não exige apagá-las.
 
-Ambos recebem os segredos. APP_ORIGIN deve ser exatamente https://agente-agente-chapelao.b1h6rm.easypanel.host sem barra final. Configure reinício automático. Não usar processos de worker que encerram após uma requisição HTTP.
+## Referências
 
-O Dockerfile recompila o painel e usa npm ci. Não publica arquivos .env. O agente legado continua como padrão enquanto CENTRAL_ENABLED não for true. Para testar a central antes do corte, preferir um serviço/staging separado com números de teste.
-
-## Corte dos webhooks, depois dos testes
-
-| Instância             | Endpoint da central                                                                                              |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Chapela - atendimento | https://agente-agente-chapelao.b1h6rm.easypanel.host/api/webhooks/evolution/435ce918-8d86-4d77-b14e-8cccf751bb88 |
-| chapelao              | https://agente-agente-chapelao.b1h6rm.easypanel.host/api/webhooks/evolution/adcfdc9d-3bd9-46ad-b096-76fd032a919c |
-
-Salvar a configuração antiga para recuperação antes de editar. Configurar segredo diferente em X-Webhook-Secret para cada endpoint; HTTPS; byEvents=false; base64=false; eventos MESSAGES_UPSERT, MESSAGES_UPDATE, SEND_MESSAGE e CONNECTION_UPDATE conforme o contrato testado de 2.3.7. Não deixar webhook global duplicado ou outro bot respondendo a essas instâncias.
-
-O endpoint legado /webhook retorna 410 em modo central. GET /api/health informa somente liveness; não comprova worker saudável ou conexão das instâncias. Usar a área de operação para isso.
-
-Fazer piloto no principal e depois habilitar o secundário. Primeiro validar atendimento humano com IA pausada. Só habilitar IA por instância depois de confirmar o modelo, o catálogo e o contrato dos eventos. Nenhuma ativação ou mudança remota foi feita nesta entrega.
-
-## Verificação e critérios ainda pendentes
-
-Resultado verificado: 21 testes da central passaram; os 12 grupos de testes existentes (121 verificações) passaram; compilação TypeScript/Vite e verificação de sintaxe passaram; npm audit retornou zero vulnerabilidades. Interface conferida no navegador, incluindo assunção e envio enfileirado em demonstração.
-
-A suíte local usa Postgres PGlite para executar o SQL e as transações, incluindo RLS real. O adapter de teste serializa conexões e substitui advisory locks porque PGlite não os implementa. **Isso não comprova concorrência de sessões PostgreSQL reais ou comportamento durante queda de conexão de rede.** O teste de locks verifica a ordem e a liberação de recursos.
-
-A prova real de Evolution ainda deve capturar fixtures sanitizadas de mensagem, eco, status, mídia, JID e desconexão; testar as duas instâncias e os 28 cenários de aceite do documento original, especialmente assumir durante POST, queda do worker, áudio/duas abas, reconexão Realtime, revogação e tempo de alerta.
-
-Ainda pendem: acesso de implantação no Easypanel; acesso administrativo/DSN Supabase; credenciais OpenAI do serviço; testes reais e advisors; validação real de anexos/Storage e ensaio de backup/restauração. Não considerar produção pronta somente pelo sucesso dos testes locais.
-
-## Referências consultadas
-
-- [RLS e grants no Supabase](https://supabase.com/docs/guides/database/postgres/row-level-security)
-- [Postgres Changes](https://supabase.com/docs/guides/realtime/postgres-changes)
-- [Changelog do Supabase](https://supabase.com/changelog)
-- [Contrato Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
-- [Router de mensagens Evolution](https://github.com/evolution-foundation/evolution-api/blob/main/src/api/routes/sendMessage.router.ts) — código main é referência, não prova da imagem 2.3.7 instalada.
+- [API Easypanel](https://easypanel.io/docs/api)
+- [TLS Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres#ssl-connections)
+- [RLS Supabase](https://supabase.com/docs/guides/database/postgres/row-level-security)
+- [Webhook Evolution 2.3.7](https://github.com/evolution-foundation/evolution-api/blob/2.3.7/src/api/integrations/event/webhook/webhook.controller.ts)
+- [Webhook de recompra inspecionado](https://github.com/pertso402/Agente-recompra-chapelao/blob/main/app/api/webhook-recompra/route.js)
