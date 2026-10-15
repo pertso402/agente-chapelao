@@ -5,6 +5,7 @@ const ws = require('ws');
 const { normalizar, parseItens, avaliarRascunho, calcularSubtotal, calcularTotais } = require('../utils/pedido');
 const { hojeLocal, money } = require('../config');
 const logger = require('../logger');
+const legacyContext = require('../central/legacy-context');
 
 const sb = createClient(
   process.env.SUPA_URL,
@@ -21,6 +22,8 @@ const sb = createClient(
 // itens de ontem pra quem já tinha recebido a marmita. Por isso: busca DESC
 // (as mais recentes) e só depois inverte pra ordem cronológica.
 async function carregarHistorico(telefone, limite = 16) {
+  const scope = legacyContext.current();
+  if (scope) return scope.history.slice(-limite);
   const { data, error } = await sb
     .from('n8n_chat_histories')
     .select('message, created_at')
@@ -40,10 +43,15 @@ async function carregarHistorico(telefone, limite = 16) {
     .filter(m => m && m.role && m.content);
 }
 
-async function salvarMensagem(telefone, role, content) {
+async function salvarMensagem(telefone, role, content, metadata = {}) {
+  const scope = legacyContext.current();
+  if (scope) {
+    await scope.recordHistory(role, content);
+    if (role === 'assistant') return; // The dispatcher records assistant text only after provider acceptance.
+  }
   const { error } = await sb.from('n8n_chat_histories').insert({
     session_id: telefone,
-    message: JSON.stringify({ role, content, ts: Date.now() }),
+    message: JSON.stringify({ role, content, ts: Date.now(), central_message_id: metadata.centralMessageId || scope?.currentMessageId || undefined }),
   });
   if (error) throw new Error(`Supabase/salvarMensagem: ${error.message}`);
 }
@@ -233,6 +241,12 @@ async function reivindicarTravados(travadoMs) {
 // ─── PAUSA DE ATENDIMENTO (atendente humano assumiu) ─────────────────────────
 
 async function verificarPausa(telefone) {
+  const scope = legacyContext.current();
+  if (scope) return Boolean(scope.handoffReason);
+  if (process.env.CENTRAL_FULL_AGENT === 'true') {
+    const paused = await require('../central/full-agent').backgroundPaused(telefone);
+    if (paused !== null) return paused;
+  }
   const tel = String(telefone).replace(/\D/g, '');
   const { data } = await sb
     .from('agente_pausas')
@@ -244,6 +258,11 @@ async function verificarPausa(telefone) {
 }
 
 async function pausarAtendimento(telefone, ms, motivo) {
+  const scope = legacyContext.current();
+  if (scope) { scope.requestHandoff(motivo); return; }
+  if (process.env.CENTRAL_FULL_AGENT === 'true') {
+    await require('../central/full-agent').backgroundHandoff(telefone, motivo);
+  }
   const tel = String(telefone).replace(/\D/g, '');
   const pausadoAte = new Date(Date.now() + ms).toISOString();
   const { error } = await sb
@@ -266,6 +285,9 @@ async function retomarAtendimento(telefone) {
 // pro atendente assumir a conversa.
 
 async function criarAlertaAtendimento(telefone, nomeCliente, motivo) {
+  const scope = legacyContext.current();
+  if (scope) scope.requestHandoff(motivo);
+  else if (process.env.CENTRAL_FULL_AGENT === 'true') await require('../central/full-agent').backgroundHandoff(telefone, motivo);
   const tel = String(telefone).replace(/\D/g, '');
   const { error } = await sb
     .from('atendimento_alertas')

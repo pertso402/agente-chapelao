@@ -1,19 +1,18 @@
-FROM node:20-alpine
-
+FROM node:24-alpine AS build
 WORKDIR /app
-
-# Instalar dependências primeiro (cache layer)
 COPY package*.json ./
-RUN npm ci --omit=dev
-
-# Copiar código
-COPY src/ ./src/
-
-# Porta exposta
-EXPOSE 3000
-
-# Variáveis de ambiente padrão (sobrescritas pelo EasyPanel)
+RUN npm ci
+COPY central/ ./central/
+RUN npm run build:central
+FROM node:24-alpine
+WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
-
-CMD ["node", "src/index.js"]
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY src/ ./src/
+COPY certificates/ ./certificates/
+COPY --from=build /app/central/public ./central/public
+USER node
+EXPOSE 3000
+CMD ["node", "src/start.js"]
