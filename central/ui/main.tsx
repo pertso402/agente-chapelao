@@ -167,6 +167,10 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
 // Activation credentials stay in the fragment, never query strings or referrers.
 let activationToken = new URLSearchParams(window.location.hash.slice(1)).get("activate");
 if (activationToken) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+async function readResponse(response: Response) {
+  try { return await response.json(); }
+  catch { throw new Error("A central está temporariamente indisponível. Tente novamente."); }
+}
 function App() {
   const [config, setConfig] = useState<Config | null>(null),
     [client, setClient] = useState<SupabaseClient | null>(null),
@@ -186,6 +190,7 @@ function App() {
     [pending, setPending] = useState(0),
     [drafts, setDrafts] = useState<Record<string, string>>({});
   const [error, setError] = useState(""),
+    [syncError, setSyncError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(""),
     [connection, setConnection] = useState("Conectando…"),
@@ -235,7 +240,7 @@ function App() {
   }, [client, config]);
   useEffect(() => {
     fetch("/api/config")
-      .then((r) => r.json())
+      .then((r) => readResponse(r))
       .then((c: Config) => {
         setConfig(c);
         if (c.authMode !== "password") return;
@@ -267,10 +272,10 @@ function App() {
     activationToken = null;
     const ready = activate ? fetch("/api/internal/enroll", {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({token:activate})
-    }).then(async r => { const v=await r.json(); if(!r.ok) throw new Error(v.error || "Não foi possível ativar este aparelho."); }) : Promise.resolve();
+    }).then(async r => { const v=await readResponse(r); if(!r.ok) throw new Error(v.error || "Não foi possível ativar este aparelho."); }) : Promise.resolve();
     ready.then(() => fetch("/api/internal/access"))
       .then(async (r) => {
-        const v = await r.json();
+        const v = await readResponse(r);
         if (!r.ok) throw new Error(v.error || "Acesso interno indisponível.");
         return v;
       })
@@ -299,7 +304,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: operator }),
       });
-      const v = await r.json();
+      const v = await readResponse(r);
       if (!r.ok) throw new Error(v.error || "Não foi possível entrar.");
       setToken("internal-session");
     } catch (e) {
@@ -332,7 +337,7 @@ function App() {
           setSound(false);
         }
       }
-      const value = await response.json();
+      const value = await readResponse(response);
       if (!response.ok) throw new Error(value.error || "A operação falhou.");
       return value;
     },
@@ -455,6 +460,9 @@ function App() {
       setList(convos.items);
       setHasMore(convos.hasMore);
       setPending(queue.count);
+      setSyncError("");
+      if (config && config.authMode !== "password")
+        setConnection(config.demo ? "Demonstração local" : "Atualização automática");
       const id = selectedId.current;
       if (id) {
         const detail = await api("/conversations/" + id);
@@ -468,10 +476,10 @@ function App() {
         await loadMessages(id);
       }
     } catch (e) {
-      setError((e as Error).message);
-      setConnection("Atualização indisponível");
+      setSyncError("Não foi possível atualizar agora. Tentando reconectar automaticamente…");
+      setConnection("Reconectando…");
     }
-  }, [token, api, params, loadMessages]);
+  }, [token, api, params, loadMessages, config?.authMode, config?.demo]);
   useEffect(() => {
     if (!token) return;
     refresh();
@@ -929,10 +937,10 @@ function App() {
           </button>
         )}
       </div>
-      {error && (
+      {(error || syncError) && (
         <div className="global-error" role="alert">
-          {error}
-          <button onClick={() => setError("")} aria-label="Fechar aviso">
+          {error || syncError}
+          <button onClick={() => { setError(""); setSyncError(""); }} aria-label="Fechar aviso">
             ×
           </button>
         </div>
@@ -1527,7 +1535,7 @@ function Media({
         headers: { Authorization: "Bearer " + token },
       });
       if (!r.ok) {
-        const b = await r.json();
+        const b = await readResponse(r);
         throw new Error(b.error || "Não foi possível recuperar a mídia.");
       }
       const blob = await r.blob();
