@@ -7,6 +7,7 @@ type Config = {
   publishableKey: string;
   restaurantId: string;
   demo: boolean;
+  authMode: "password" | "internal_network";
 };
 type Me = { id: string; name: string; role: string };
 type Instance = {
@@ -186,6 +187,11 @@ function App() {
     [busy, setBusy] = useState(""),
     [connection, setConnection] = useState("Conectando…"),
     [sound, setSound] = useState(false);
+  const [internalMembers, setInternalMembers] = useState<
+    { user_id: string; display_name: string }[]
+  >([]);
+  const [operator, setOperator] = useState("");
+  const [internalLoading, setInternalLoading] = useState(false);
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [loginBusy, setLoginBusy] = useState(false),
@@ -206,6 +212,15 @@ function App() {
     scroll = useRef<HTMLDivElement | null>(null),
     selectedId = useRef<string | null>(null);
   const logout = useCallback(async () => {
+    if (config?.authMode === "internal_network") {
+      const response = await fetch("/api/internal/logout", { method: "POST" });
+      if (!response.ok) {
+        setError(
+          "Não foi possível trocar a pessoa responsável. Tente novamente.",
+        );
+        return;
+      }
+    }
     setToken("");
     setMe(null);
     setList([]);
@@ -214,12 +229,17 @@ function App() {
     setDrafts({});
     setSound(false);
     if (client) await client.auth.signOut();
-  }, [client]);
+  }, [client, config]);
   useEffect(() => {
     fetch("/api/config")
       .then((r) => r.json())
       .then((c: Config) => {
         setConfig(c);
+        if (c.authMode === "internal_network") return;
+        if (c.demo) {
+          setToken("demo");
+          return;
+        }
         if (!c.demo) {
           const sb = createClient(c.supabaseUrl, c.publishableKey);
           setClient(sb);
@@ -236,6 +256,50 @@ function App() {
         setError("Não foi possível carregar a central. Recarregue a página."),
       );
   }, []);
+  useEffect(() => {
+    if (config?.authMode !== "internal_network" || token) return;
+    let active = true;
+    setInternalLoading(true);
+    fetch("/api/internal/access")
+      .then(async (r) => {
+        const v = await r.json();
+        if (!r.ok) throw new Error(v.error || "Acesso interno indisponível.");
+        return v;
+      })
+      .then((v) => {
+        if (!active) return;
+        setInternalMembers(v.members);
+        if (v.selected) setToken("internal-session");
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      })
+      .finally(() => {
+        if (active) setInternalLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [config, token]);
+  async function enterInternal(event: React.FormEvent) {
+    event.preventDefault();
+    setLoginBusy(true);
+    setError("");
+    try {
+      const r = await fetch("/api/internal/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: operator }),
+      });
+      const v = await r.json();
+      if (!r.ok) throw new Error(v.error || "Não foi possível entrar.");
+      setToken("internal-session");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoginBusy(false);
+    }
+  }
   const api = useCallback(
     async (url: string, init: RequestInit = {}) => {
       const response = await fetch("/api" + url, {
@@ -403,7 +467,10 @@ function App() {
   useEffect(() => {
     if (!token) return;
     refresh();
-    const t = setInterval(refresh, 30000);
+    const t = setInterval(
+      refresh,
+      config?.authMode === "internal_network" ? 1500 : 30000,
+    );
     const focus = () => {
       if (!document.hidden) refresh();
     };
@@ -414,11 +481,15 @@ function App() {
       document.removeEventListener("visibilitychange", focus);
       window.removeEventListener("focus", focus);
     };
-  }, [token, refresh]);
+  }, [token, refresh, config?.authMode]);
   useEffect(() => {
     if (!token || !config) return;
     if (config.demo) {
       setConnection("Demonstração local");
+      return;
+    }
+    if (config.authMode === "internal_network") {
+      setConnection("Atualização automática");
       return;
     }
     if (!client) return;
@@ -574,6 +645,73 @@ function App() {
       <div className="loading">
         Carregando a central…{error && <p role="alert">{error}</p>}
       </div>
+    );
+  if (!token && config.authMode === "internal_network")
+    return (
+      <main className="internal-entry">
+        <section className="internal-card">
+          <div className="brand-mark">
+            C<span>•</span>
+          </div>
+          <span className="eyebrow">CENTRAL CHAPELÃO · USO INTERNO</span>
+          <h1>
+            Bom atendimento
+            <br />
+            começa com a equipe.
+          </h1>
+          <p>
+            Escolha seu nome para identificar os atendimentos que você assumir.
+            Este navegador lembrará a escolha.
+          </p>
+          <form onSubmit={enterInternal}>
+            <label>
+              Quem está atendendo?
+              <select
+                required
+                aria-label="Seu nome"
+                value={operator}
+                onChange={(e) => setOperator(e.target.value)}
+              >
+                <option value="">Selecione seu nome</option>
+                {internalMembers.map((m) => (
+                  <option key={m.user_id} value={m.user_id}>
+                    {m.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="primary"
+              disabled={loginBusy || internalLoading || !operator}
+            >
+              {internalLoading
+                ? "Conferindo acesso da empresa…"
+                : loginBusy
+                  ? "Abrindo…"
+                  : "Abrir central"}
+              <Icon name="arrow" />
+            </button>
+          </form>
+          {!internalLoading && !internalMembers.length && !error && (
+            <div className="notice">
+              A equipe ainda precisa ser cadastrada na configuração da central.
+            </div>
+          )}
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+          <small>
+            Acesso restrito à rede do restaurante · Sem e-mail e senha
+          </small>
+          {config.demo && (
+            <p className="demo-caption">
+              Demonstração com dados fictícios. Nenhum WhatsApp real conectado.
+            </p>
+          )}
+        </section>
+      </main>
     );
   if (!token || recovery)
     return (
@@ -748,8 +886,8 @@ function App() {
           </span>
           <button
             className="icon-button"
-            title="Sair"
-            aria-label="Sair"
+            title={config.authMode === "internal_network" ? "Trocar pessoa" : "Sair"}
+            aria-label={config.authMode === "internal_network" ? "Trocar pessoa" : "Sair"}
             onClick={logout}
           >
             <Icon name="logout" />

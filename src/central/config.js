@@ -24,6 +24,19 @@ const instances = [
 function configuration(env = process.env) {
   return {
     restaurantId: IDS.restaurant,
+    authMode:
+      env.CENTRAL_AUTH_MODE === "internal_network"
+        ? "internal_network"
+        : "password",
+    internalAllowedCidrs: (env.CENTRAL_ALLOWED_CIDRS || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean),
+    trustedProxyCidrs: (env.CENTRAL_TRUST_PROXY_CIDRS || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean),
+    internalSessionSecret: env.CENTRAL_SESSION_SECRET || "",
     origin: env.APP_ORIGIN || "http://localhost:3000",
     supabaseUrl: env.SUPA_URL || "https://qlswjefuinhbtlhauhgj.supabase.co",
     publishableKey: env.SUPA_KEY || "",

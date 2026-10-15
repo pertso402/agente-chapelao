@@ -2,9 +2,37 @@
 
 Implementação local a partir de especificacao-central-whatsapp.md, no repositório agente-chapelao. Data: 15/10/2026, fuso America/Sao_Paulo.
 
+## Entrada interna, sem e-mail ou senha
+
+Conforme solicitado, o modo de implantação desta empresa é CENTRAL_AUTH_MODE=internal_network. A central só libera dados e comandos quando a origem está na lista de IPs/redes autorizadas. Na primeira abertura, a atendente escolhe o nome; um cookie assinado, HttpOnly e SameSite=Strict guarda a identificação por 180 dias. Depois, basta abrir o endereço. “Trocar pessoa” permite usar outro nome no mesmo computador.
+
+Essa escolha identifica o responsável pelo atendimento; não é uma autenticação individual. Dentro da rede autorizada é possível escolher qualquer perfil ativo. Os papéis dos perfis continuam registrados no banco. Por isso a restrição precisa usar o IP público real do restaurante e os proxies confiáveis corretos do Easypanel. Sem rede/segredo configurados, o backend nega acesso. Não liberar 0.0.0.0/0, não confiar indiscriminadamente em X-Forwarded-For e não expor a porta do contêiner de forma a contornar o proxy.
+
+Variáveis novas:
+
+```env
+CENTRAL_AUTH_MODE=internal_network
+CENTRAL_ALLOWED_CIDRS=<ip-publico-do-restaurante>/32
+CENTRAL_TRUST_PROXY_CIDRS=<rede-do-proxy-Traefik-confirmada>
+CENTRAL_SESSION_SECRET=<segredo-aleatorio-com-pelo-menos-32-caracteres>
+```
+
+O webhook Evolution continua acessível externamente com seu próprio segredo; a restrição da rede aplica-se ao painel e às APIs das atendentes. Ela não bloqueia a chegada dos eventos do WhatsApp.
+
+No modo interno, o navegador lê o backend com o cookie e consulta atualizações a cada 1,5 segundo. A chave publicável e o JWT Supabase do usuário não são necessários no navegador. O banco continua com RLS/grants fechados para acesso anônimo. O modo password permanece disponível por configuração para uma futura necessidade de acesso individual externo; ele não é o modo selecionado para o restaurante.
+
+Cadastrar a equipe sem pedir endereços de e-mail:
+
+```sh
+node scripts/central-operator.js "Ana" attendant
+node scripts/central-operator.js "Gestão" admin
+```
+
+O script usa o segredo administrativo do Supabase para criar identificadores técnicos aleatórios, sem enviar convite e sem entregar credenciais à equipe. Não executar a central com perfis fictícios da demonstração em produção.
+
 ## Situação da entrega
 
-O código implementa painel React/TypeScript, API Express, worker Node persistente e migração Supabase com RLS. **Ainda não foi aplicado ao Supabase nem publicado no Easypanel.** Nenhum webhook real foi redirecionado e nenhuma mensagem foi enviada aos clientes durante o desenvolvimento.
+O código implementa painel React/TypeScript, entrada interna por rede, API Express, worker Node persistente e migração Supabase com RLS. **Ainda não foi aplicado ao Supabase nem publicado no Easypanel.** Nenhum webhook real foi redirecionado e nenhuma mensagem foi enviada aos clientes durante o desenvolvimento.
 
 O agente atual permanece como padrão de inicialização. A central só inicia com CENTRAL_ENABLED=true. A versão legada e seus pollers não são carregados nesse modo. Não execute o agente legado em outro contêiner respondendo aos mesmos números após o corte.
 
@@ -39,7 +67,7 @@ As consultas foram somente leitura. O retorno atual de configuração não confi
 - Locks de sessão: instância antes da conversa. Pausa global usa lock exclusivo da instância.
 - Snapshot de versão conferido depois da geração e antes do despacho. Modelo fora do lock; POST externo dentro da barreira de coordenação, sem transação SQL aberta durante a rede.
 - Status real de outbox, tratamento unknown sem retry cego e resolução explícita auditada por administrador.
-- Login e recuperação de senha pelo Supabase Auth; membership revalidada no backend; RLS de leitura; sem escrita direta do browser.
+- Entrada direta na rede autorizada, escolha persistida do nome e membership revalidada no backend; RLS sem escrita direta do browser. Login Supabase permanece apenas no modo opcional password.
 - Admin pode desativar/reativar membros. Desativação devolve suas conversas e cancela mensagens pendentes na mesma transação, além de remover sessões Auth. Envios humanos incertos bloqueiam a operação até conferência.
 - Painel em português, filas, busca, filtro por número, histórico paginado, mídia com autenticação e rascunho preservado em erro de envio.
 - Realtime para atualização e snapshot periódico de 30 segundos como recuperação; alerta sonoro ativado por clique, com aba líder via Web Locks em navegadores compatíveis.
@@ -99,9 +127,9 @@ Para a instalação real, configure segredos no Easypanel seguindo .env.central.
 1. Confirmar acesso administrativo ao projeto e backup recuperável. Conferir schema e tabelas já existentes com node scripts/central-db.js inspect.
 2. Aplicar a migração revisada: node scripts/central-db.js apply. Isso cria somente os objetos da central e inicia as duas instâncias com IA pausada.
 3. Criar o bucket privado com node scripts/central-storage.js. Executar os advisors de segurança e revisar grants/RLS no Supabase real. Eles não foram executados nesta sessão.
-4. Desativar cadastro público no Supabase Auth. Convidar as contas individuais pelo painel Auth; configurar Site URL e redirect de recuperação para o domínio da central.
-5. Associar a conta já existente com node scripts/central-admin.js EMAIL admin "Nome". Para atendentes, usar attendant. Esse script não envia convites nem inventa contas.
-6. Conferir leitura de membro, bloqueio de não membro e negação de escrita direta usando JWTs reais de duas atendentes e um administrador.
+4. Desativar cadastro público no Supabase Auth. No modo interno, cadastrar os nomes com scripts/central-operator.js. O script cria o vínculo técnico necessário, sem exigir e-mail ou senha da equipe.
+5. Para contas Auth já existentes, o script central-admin.js continua disponível. Para a instalação interna nova, usar central-operator.js com nome e papel.
+6. Conferir acesso pela rede do restaurante, bloqueio externo mesmo com cookie válido, proxy, persistência após recarregar, revogação de membro e negação de escrita anônima no Supabase.
 
 Não usar a chave publicável para administração. SUPA_SERVICE_KEY, DATABASE_URL, chaves Evolution e chave OpenAI ficam somente no servidor. As credenciais recebidas foram guardadas em .env.central local ignorado pelo Git e excluído do pacote de código.
 
@@ -133,13 +161,13 @@ Fazer piloto no principal e depois habilitar o secundário. Primeiro validar ate
 
 ## Verificação e critérios ainda pendentes
 
-Resultado verificado: 19 testes da central passaram; os 12 grupos de testes existentes (121 verificações) passaram; compilação TypeScript/Vite e verificação de sintaxe passaram; npm audit retornou zero vulnerabilidades. Interface conferida no navegador, incluindo assunção e envio enfileirado em demonstração.
+Resultado verificado: 21 testes da central passaram; os 12 grupos de testes existentes (121 verificações) passaram; compilação TypeScript/Vite e verificação de sintaxe passaram; npm audit retornou zero vulnerabilidades. Interface conferida no navegador, incluindo assunção e envio enfileirado em demonstração.
 
 A suíte local usa Postgres PGlite para executar o SQL e as transações, incluindo RLS real. O adapter de teste serializa conexões e substitui advisory locks porque PGlite não os implementa. **Isso não comprova concorrência de sessões PostgreSQL reais ou comportamento durante queda de conexão de rede.** O teste de locks verifica a ordem e a liberação de recursos.
 
 A prova real de Evolution ainda deve capturar fixtures sanitizadas de mensagem, eco, status, mídia, JID e desconexão; testar as duas instâncias e os 28 cenários de aceite do documento original, especialmente assumir durante POST, queda do worker, áudio/duas abas, reconexão Realtime, revogação e tempo de alerta.
 
-Ainda pendem: acesso de implantação no Easypanel; acesso administrativo/DSN Supabase; chave publicável válida; e-mail da conta administradora; credenciais OpenAI do serviço; testes reais e advisors; validação real de anexos/Storage e ensaio de backup/restauração. Não considerar produção pronta somente pelo sucesso dos testes locais.
+Ainda pendem: acesso de implantação no Easypanel; acesso administrativo/DSN Supabase; credenciais OpenAI do serviço; testes reais e advisors; validação real de anexos/Storage e ensaio de backup/restauração. Não considerar produção pronta somente pelo sucesso dos testes locais.
 
 ## Referências consultadas
 

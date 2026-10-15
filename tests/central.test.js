@@ -688,3 +688,140 @@ test("replay após commit da decisão não cria segunda resposta ou job de envio
     1,
   );
 });
+
+test("entrada interna não exige e-mail/senha e lembra a pessoa pelo cookie protegido", async (t) => {
+  const s = await setup();
+  t.after(() => s.pool.end());
+  s.config.authMode = "internal_network";
+  s.config.internalAllowedCidrs = ["127.0.0.1/32"];
+  s.config.trustedProxyCidrs = [];
+  s.config.internalSessionSecret = "s".repeat(64);
+  const { app } = createApp({ ...s });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const base = "http://127.0.0.1:" + server.address().port;
+  assert.equal((await fetch(base + "/api/me")).status, 401);
+  const access = await (await fetch(base + "/api/internal/access")).json();
+  assert.equal(access.members.length, 3);
+  assert.equal(access.selected, null);
+  assert.equal(
+    (
+      await fetch(base + "/api/internal/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: USERS.alice }),
+      })
+    ).status,
+    403,
+  );
+  const choose = await fetch(base + "/api/internal/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: s.config.origin },
+    body: JSON.stringify({ userId: USERS.alice }),
+  });
+  assert.equal(choose.status, 200);
+  const raw = choose.headers.get("set-cookie");
+  assert.ok(raw.includes("HttpOnly"));
+  assert.ok(raw.includes("SameSite=Strict"));
+  const cookie = raw.split(";")[0];
+  for (let n = 0; n < 3; n++) {
+    const r = await fetch(base + "/api/me", {
+      headers: { Cookie: cookie, Authorization: "Bearer qualquer-coisa" },
+    });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).id, USERS.alice);
+  }
+  const persisted = await (
+    await fetch(base + "/api/internal/access", { headers: { Cookie: cookie } })
+  ).json();
+  assert.equal(persisted.selected, USERS.alice);
+  const c = await ingest(s);
+  const action = await fetch(base + "/api/conversations/" + c.id + "/claim", {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      "Content-Type": "application/json",
+      Origin: s.config.origin,
+      "Idempotency-Key": randomUUID(),
+    },
+    body: "{}",
+  });
+  assert.equal(action.status, 200);
+  const tampered = cookie.slice(0, -1) + (cookie.endsWith("a") ? "b" : "a");
+  assert.equal(
+    (await fetch(base + "/api/me", { headers: { Cookie: tampered } })).status,
+    401,
+  );
+  await s.pool.query("update cw_members set active=false where user_id=$1", [
+    USERS.alice,
+  ]);
+  assert.equal(
+    (await fetch(base + "/api/me", { headers: { Cookie: cookie } })).status,
+    403,
+  );
+  const out = await fetch(base + "/api/internal/logout", {
+    method: "POST",
+    headers: { Origin: s.config.origin, Cookie: cookie },
+  });
+  assert.equal(out.status, 200);
+  assert.ok(out.headers.get("set-cookie").includes("Max-Age=0"));
+});
+
+test("modo interno bloqueia rede não autorizada e não confia em X-Forwarded-For arbitrário", async (t) => {
+  const s = await setup();
+  t.after(() => s.pool.end());
+  s.config.authMode = "internal_network";
+  s.config.internalAllowedCidrs = ["203.0.113.5/32"];
+  s.config.trustedProxyCidrs = [];
+  s.config.internalSessionSecret = "s".repeat(64);
+  const { app } = createApp({ ...s });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const base = "http://127.0.0.1:" + server.address().port;
+  for (const route of ["/api/internal/access", "/api/me", "/api/conversations"])
+    assert.equal(
+      (
+        await fetch(base + route, {
+          headers: {
+            "X-Forwarded-For": "203.0.113.5",
+            Authorization: "Bearer teste",
+          },
+        })
+      ).status,
+      403,
+    );
+  // O webhook mantém seu próprio segredo e pode chegar da Evolution fora da LAN.
+  const body = { ...payload(), instance: "Chapela - atendimento" };
+  assert.equal(
+    (
+      await fetch(base + "/api/webhooks/evolution/" + IDS.primary, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Webhook-Secret": "a".repeat(64),
+        },
+        body: JSON.stringify(body),
+      })
+    ).status,
+    200,
+  );
+  const { createInternalAccess } = require("../src/central/internal-access");
+  assert.throws(
+    () =>
+      createInternalAccess(
+        { ...s.config, internalAllowedCidrs: ["0.0.0.0/0"] },
+        s.pool,
+      ),
+    (e) => e.status === 503,
+  );
+  const unset = createInternalAccess(
+    { ...s.config, internalAllowedCidrs: [] },
+    s.pool,
+  );
+  assert.throws(
+    () => unset.checkNetwork({ ip: "127.0.0.1" }),
+    (e) => e.status === 503,
+  );
+});

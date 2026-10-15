@@ -17,11 +17,17 @@ function createApp({
 }) {
   const app = express(),
     engine = new Engine({ pool, config, evolution });
-  const supabase = authenticate
-    ? null
-    : createClient(config.supabaseUrl, config.publishableKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
+  const internal =
+    config.authMode === "internal_network"
+      ? require("./internal-access").createInternalAccess(config, pool)
+      : null;
+  if (internal) app.set("trust proxy", internal.trustProxy);
+  const supabase =
+    authenticate || internal
+      ? null
+      : createClient(config.supabaseUrl, config.publishableKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
   app.disable("x-powered-by");
   app.use((req, res, next) => {
     res.set({
@@ -44,10 +50,26 @@ function createApp({
       publishableKey: config.publishableKey,
       restaurantId: config.restaurantId,
       demo,
+      authMode: config.authMode || "password",
     }),
   );
   const asyncRoute = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res)).catch(next);
+  if (internal) {
+    app.get(
+      "/api/internal/access",
+      asyncRoute(async (req, res) => res.json(await internal.access(req))),
+    );
+    app.post(
+      "/api/internal/select",
+      express.json({ limit: "2kb", strict: true }),
+      asyncRoute(async (req, res) => res.json(await internal.select(req, res))),
+    );
+    app.post(
+      "/api/internal/logout",
+      asyncRoute(async (req, res) => res.json(internal.logout(req, res))),
+    );
+  }
   // Webhooks são autenticados antes de ler/gravar o corpo.
   app.post(
     "/api/webhooks/evolution/:instanceId",
@@ -75,9 +97,12 @@ function createApp({
   app.use("/api", (req, res, next) => {
     (async () => {
       const token = req.get("Authorization")?.match(/^Bearer (.+)$/)?.[1];
-      assert(token, 401, "Entre na central.");
+      if (!internal) assert(token, 401, "Entre na central.");
       let user;
-      if (authenticate) user = await authenticate(token);
+      if (internal) {
+        internal.checkNetwork(req);
+        user = internal.read(req);
+      } else if (authenticate) user = await authenticate(token);
       else {
         const { data, error } = await supabase.auth.getUser(token);
         assert(
@@ -370,16 +395,14 @@ function createApp({
   app.use((error, _req, res, _next) => {
     const status =
       error.status || (error.type === "entity.too.large" ? 413 : 500);
-    res
-      .status(status)
-      .json({
-        error:
-          status < 500
-            ? error.type === "entity.parse.failed"
-              ? "JSON inválido."
-              : error.message
-            : "Serviço indisponível. Tente novamente.",
-      });
+    res.status(status).json({
+      error:
+        status < 500
+          ? error.type === "entity.parse.failed"
+            ? "JSON inválido."
+            : error.message
+          : "Serviço indisponível. Tente novamente.",
+    });
   });
   return { app, engine };
 }

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/start.js",
     "dev": "node --watch src/start.js",
-    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js && node --check scripts/testar-loja.js && node --check scripts/testar-taxa.js && node --check src/central/server.js && node --check src/central/engine.js && node --check src/central/database.js && node --check src/central/worker-main.js && node --check src/central/agent.js && node --check scripts/central-db.js && node --check scripts/central-admin.js && node --check src/central/storage.js && node --check scripts/central-storage.js",
+    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/tools/index.js && node --check src/utils/pedido.js && node --check src/services/supabase.js && node --check src/services/media.js && node --check src/services/evolution.js && node --check scripts/testar-loja.js && node --check scripts/testar-taxa.js && node --check src/central/server.js && node --check src/central/engine.js && node --check src/central/database.js && node --check src/central/worker-main.js && node --check src/central/agent.js && node --check scripts/central-db.js && node --check scripts/central-admin.js && node --check src/central/storage.js && node --check scripts/central-storage.js && node --check src/central/internal-access.js && node --check scripts/central-operator.js",
     "test:precos": "node scripts/testar-precos.js",
     "test:modelo": "node scripts/testar-modelo.js",
     "test": "npm run test:precos && npm run test:modelo && npm run test:loja && npm run test:pix && npm run test:taxa && npm run test:agrupamento && npm run test:entendimento && npm run test:intencao && npm run test:tools && npm run test:followup && npm run test:fluxo && npm run test:fumaca",
@@ -33,6 +33,7 @@
     "form-data": "4.0.6",
     "openai": "6.49.0",
     "pg": "8.23.1",
+    "proxy-addr": "2.0.8",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "ws": "8.21.0"

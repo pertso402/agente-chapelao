@@ -5,7 +5,11 @@ const { configuration, IDS } = require("../src/central/config");
 const { createApp } = require("../src/central/server");
 (async () => {
   const { pool } = await testDatabase();
-  const config = configuration({});
+  const config = configuration({
+    CENTRAL_AUTH_MODE: "internal_network",
+    CENTRAL_ALLOWED_CIDRS: "127.0.0.1/32,::1/128",
+    CENTRAL_SESSION_SECRET: "local-demo-session-secret-not-used-in-production",
+  });
   config.origin = "http://localhost:3000";
   const evolution = {
     state: async () => ({ instance: { state: "open" } }),

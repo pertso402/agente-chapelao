@@ -1878,3 +1878,88 @@ small {
     font-size: 10px;
   }
 }
+
+.internal-entry {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 30px 20px;
+  background: #f4f4ec;
+}
+.internal-card {
+  width: min(480px, 100%);
+  background: #fff;
+  border: 1px solid #e1e6da;
+  border-radius: 18px;
+  padding: 40px 42px;
+  box-shadow: 0 12px 40px #34452c06;
+}
+.internal-card .brand-mark {
+  margin-bottom: 22px;
+  font-size: 54px;
+  line-height: 1;
+}
+.internal-card .eyebrow {
+  font-size: 9px;
+  color: #68755e;
+}
+.internal-card h1 {
+  font-family: Georgia, serif;
+  font-size: 34px;
+  font-weight: 400;
+  letter-spacing: -0.8px;
+  line-height: 1.2;
+  margin: 18px 0;
+}
+.internal-card > p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #69755f;
+}
+.internal-card form {
+  margin: 25px 0;
+  display: grid;
+  gap: 17px;
+}
+.internal-card label {
+  display: grid;
+  gap: 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.internal-card select {
+  width: 100%;
+  font-size: 14px;
+  padding: 13px;
+}
+.internal-card .primary {
+  padding: 14px;
+  justify-content: space-between;
+}
+.internal-card > small {
+  display: block;
+  text-align: center;
+  padding-top: 15px;
+  border-top: 1px solid #e5e9e3;
+  color: #6f7d64;
+  font-size: 10px;
+  line-height: 1.8;
+}
+.internal-card .error,
+.internal-card .notice {
+  margin-bottom: 18px;
+}
+.internal-card .demo-caption {
+  font-size: 10px;
+  text-align: center;
+  margin-top: 14px;
+  color: #8a7756;
+}
+@media (max-width: 480px) {
+  .internal-card {
+    padding: 30px 24px;
+  }
+  .internal-card h1 {
+    font-size: 30px;
+  }
+}
