@@ -24,7 +24,7 @@ const {
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, relatorioDeConsumo } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const { normalizar, montarResumoFinal, descreverFaltando, avaliarRascunho } = require('./utils/pedido');
-const { capturarRespostaObvia } = require('./utils/intencao');
+const { capturarRespostaObvia, pedeConvenio } = require('./utils/intencao');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
   TAXA_ENTREGA_PADRAO, TIMEOUT_TAXA_MS,
@@ -85,6 +85,16 @@ const LIMITE_REPETICAO = Number(process.env.LIMITE_REPETICAO || 3);
 
 const MSG_ATENDENTE_PADRAO =
   'Opa, deixa eu chamar alguém da equipe pra te ajudar com isso 🙋 Um atendente assume nossa conversa em instantes, tá? 🎩';
+
+// Com a loja fechada não dá pra prometer "em instantes": o alerta fica aberto
+// no painel e alguém chama quando abrir. Quem veio da roleta precisa ouvir que
+// o prêmio continua de pé — senão acha que trocou um pelo outro.
+function mensagemConvenio({ lojaAberta, temPremio }) {
+  const premio = temPremio ? ' Seu prêmio continua garantido, viu? 🎁' : '';
+  return lojaAberta
+    ? `Que bom que você quer conhecer o *Convênio Chapelão*! 🤝 Vou chamar quem cuida disso aqui da equipe — já já te respondem nesta conversa.${premio}`
+    : `Que bom que você quer conhecer o *Convênio Chapelão*! 🤝 Anotei seu interesse, e quem cuida disso aqui da equipe te chama nesta conversa ${quandoAbreTexto()}.${premio}`;
+}
 
 // ─── FORA DO HORÁRIO DE ATENDIMENTO ───────────────────────────────────────────
 // Trava de código, não instrução de prompt: a LLM cede quando o cliente
@@ -707,6 +717,21 @@ async function processarMensagem(msg, requestId) {
       logger.warn('loja/consulta-falhou', err.message, { requestId, telefone });
       return true;
     });
+
+    // ── CONVÊNIO: sempre vai pra uma pessoa, loja aberta ou fechada ──────────
+    // Vem antes do portão de horário porque quem assiste a VSL da roleta faz
+    // isso na hora que abre a marmita, muitas vezes depois das 14h. Se já tem
+    // gente atendendo (pausa ativa), não alerta de novo: segue o fluxo normal.
+    if (pedeConvenio(conteudo) && !(await verificarPausa(telefone).catch(() => false))) {
+      const origem = ofertaAtiva?.codigo ? ` Tem o cupom *${ofertaAtiva.codigo}* ativo (${ofertaAtiva.descricao || ofertaAtiva.tipo}).` : '';
+      await escalarParaAtendente(
+        telefone,
+        `🤝 [CONVÊNIO] Cliente quer saber do Convênio Chapelão.${origem} Mensagem: "${String(conteudo).slice(0, 200)}"`,
+        requestId,
+        { mensagemCliente: mensagemConvenio({ lojaAberta, temPremio: Boolean(ofertaAtiva) }) },
+      );
+      return;
+    }
 
     if (!lojaAberta) {
       const { hora, minuto } = horaLocal();

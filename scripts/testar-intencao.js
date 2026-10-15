@@ -20,7 +20,7 @@
 const assert = require('assert');
 const {
   detectarTipoEntrega, detectarFormaPagamento,
-  normalizarTipoEntrega, normalizarFormaPagamento, capturarRespostaObvia,
+  normalizarTipoEntrega, normalizarFormaPagamento, capturarRespostaObvia, pedeConvenio,
 } = require('../src/utils/intencao');
 
 let passou = 0;
@@ -119,6 +119,22 @@ teste('a rajada da Eliane, na ordem em que aconteceu', () => {
   // 3) nada mais a capturar: o pedido não volta a perguntar o que já tem
   c = capturarRespostaObvia([], 'Entrega');
   assert.deepStrictEqual(Object.keys(c), []);
+});
+
+// A mensagem que o botão da roleta manda depois da VSL tem que cair sempre no
+// atendente — inclusive a versão que vem junto com o resgate do prêmio.
+teste('convênio: mensagens do botão da roleta são reconhecidas', () => {
+  assert.ok(pedeConvenio('Queria mais informações sobre o Convênio Chapelão'));
+  assert.ok(pedeConvenio('Oi! Vim resgatar meu prêmio COC-4821 e queria mais informações sobre o Convênio Chapelão pra minha empresa.'));
+  assert.ok(pedeConvenio('vcs tem convenio?'));
+  assert.ok(pedeConvenio('CONVÊNIOS com empresa'));
+});
+
+teste('convênio: não confunde com pedido comum', () => {
+  assert.ok(!pedeConvenio('quero uma média pra entrega'));
+  assert.ok(!pedeConvenio('pago na conveniência'));
+  assert.ok(!pedeConvenio(''));
+  assert.ok(!pedeConvenio(null));
 });
 
 console.log(`\n${process.exitCode ? '❌ FALHOU' : `✅ ${passou} testes passaram`}\n`);

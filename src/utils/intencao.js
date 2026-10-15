@@ -75,8 +75,22 @@ function capturarRespostaObvia(faltando, texto) {
   return campos;
 }
 
+// ─── CONVÊNIO CHAPELÃO ────────────────────────────────────────────────────────
+// Quem pergunta do convênio vai SEMPRE pra uma pessoa — é venda pra empresa,
+// não pedido de marmita. Decidido no código e não no prompt por dois motivos:
+// a mensagem chega pronta do botão da roleta (depois da VSL), então o texto é
+// previsível; e ela chega a qualquer hora, inclusive com a loja fechada, quando
+// a LLM nem é chamada. Lead de convênio que cai no "estamos fechados" se perde.
+//
+// "conveniencia" não casa: o \b exige a palavra inteira.
+const CONVENIO = /\bconvenios?\b/;
+
+function pedeConvenio(texto) {
+  return CONVENIO.test(normalizar(texto));
+}
+
 module.exports = {
   detectarTipoEntrega, detectarFormaPagamento,
   normalizarTipoEntrega, normalizarFormaPagamento,
-  capturarRespostaObvia,
+  capturarRespostaObvia, pedeConvenio,
 };
