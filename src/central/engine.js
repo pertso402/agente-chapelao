@@ -9,6 +9,8 @@ const {
   validateDecision,
 } = require("./domain");
 const { normalizeEvents, parseMessage } = require("./evolution");
+// Texto dos avisos de status que o painel de pedidos manda pelo número principal.
+const ORDER_NOTICE = /Seu pedido \*#[0-9]+\*/;
 class Engine {
   constructor({ pool, config, evolution, decide }) {
     Object.assign(this, { pool, config, evolution, decide });
@@ -86,6 +88,36 @@ class Engine {
     );
     await this.cancelPending(q, c, true);
     await this.audit(q, c, null, "handoff", { reason_code: code });
+  }
+  // Devolve à IA a conversa pausada só porque a equipe respondeu pelo celular
+  // ou o agente chamou alguém, depois de PAUSA_ATENDENTE_MIN sem a equipe
+  // falar — o mesmo prazo do agente original. Quem clicou Assumir na central
+  // (state 'human') continua no controle: aqui só entram pausas que ninguém
+  // assumiu de fato. Falha incerta e mídia continuam esperando conferência.
+  async expirePause(q, c) {
+    if (
+      c.state !== "waiting_human" ||
+      !c.ai_enabled ||
+      !this.config.fullAgent ||
+      c.instance_id !== require("./config").IDS.primary
+    )
+      return c;
+    const minutes = this.config.pauseMinutes || 10;
+    const { rows } = await q.query(
+      "select id from cw_handoffs where conversation_id=$1 and status='pending' and reason_code in ('external_reply','legacy_handoff') and created_at<now()-make_interval(mins=>$2) and not exists(select 1 from cw_messages m where m.conversation_id=$1 and m.direction='out' and m.author in ('external','human') and coalesce(m.text,'') !~ $3 and m.created_at>=now()-make_interval(mins=>$2))",
+      [c.id, minutes, ORDER_NOTICE.source],
+    );
+    if (!rows[0]) return c;
+    await q.query(
+      "update cw_conversations set state='ai',assignee_id=null,control_epoch=control_epoch+1,updated_at=now() where id=$1",
+      [c.id],
+    );
+    await q.query(
+      "update cw_handoffs set status='resolved',resolved_at=now() where id=$1",
+      [rows[0].id],
+    );
+    await this.audit(q, c, null, "pause_expired", { minutes });
+    return this.context(q, c.id);
   }
   async idempotent(q, user, key, action, body, fn) {
     assert(
@@ -560,6 +592,12 @@ class Engine {
             await this.audit(q, c, null, "external_outbound_while_closed");
             return; // Disparos de oferta não representam um pedido de ajuda do cliente.
           }
+          if (ORDER_NOTICE.test(msg.text || "")) {
+            // Aviso automático do painel ("seu pedido #283 está pronto"): sai
+            // pelo mesmo número, mas não é a equipe conversando com o cliente.
+            await this.audit(q, c, null, "order_notice_outbound");
+            return;
+          }
           c = await this.context(q, c.id);
           await this.handoff(
             q,
@@ -579,7 +617,7 @@ class Engine {
             inst.ai_enabled ? "ai" : "waiting_human",
           ],
         );
-        c = await this.context(q, c.id);
+        c = await this.expirePause(q, await this.context(q, c.id));
         const originalSupportsMedia = this.config.fullAgent && instanceId === require("./config").IDS.primary && ["image", "audio", "document"].includes(msg.kind);
         if (msg.kind !== "text" && c.state === "ai" && !originalSupportsMedia)
           await this.handoff(

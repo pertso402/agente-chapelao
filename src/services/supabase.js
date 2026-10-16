@@ -284,10 +284,11 @@ async function retomarAtendimento(telefone) {
 // reclama de algo que ela não resolve sozinha. Aparece no painel (com som)
 // pro atendente assumir a conversa.
 
+// Alerta sozinho NÃO tira a conversa da IA, como no agente original: o pedido
+// de taxa abre alerta e o agente precisa continuar livre pra entregar o valor
+// quando alguém digitar no painel. Quem tira da IA é pausarAtendimento, que o
+// chamar_atendente sempre chama junto.
 async function criarAlertaAtendimento(telefone, nomeCliente, motivo) {
-  const scope = legacyContext.current();
-  if (scope) scope.requestHandoff(motivo);
-  else if (process.env.CENTRAL_FULL_AGENT === 'true') await require('../central/full-agent').backgroundHandoff(telefone, motivo);
   const tel = String(telefone).replace(/\D/g, '');
   const { error } = await sb
     .from('atendimento_alertas')

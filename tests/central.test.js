@@ -976,3 +976,44 @@ test("lembrete original respeita atendimento humano e retomada aguarda nova mens
  assert.equal(await full.backgroundReply(c.phone,"resposta",{requestId:"next",etapa:"taxa"}),true);
  assert.equal(await full.backgroundReply(c.phone,"resposta",{requestId:"next",etapa:"taxa"}),false);
 });
+
+async function backdate(s, conversationId, minutes) {
+  await s.pool.query("update cw_handoffs set created_at=created_at-make_interval(mins=>$2) where conversation_id=$1", [conversationId, minutes]);
+  await s.pool.query("update cw_messages set created_at=created_at-make_interval(mins=>$2) where conversation_id=$1", [conversationId, minutes]);
+}
+const aiJobs = async (s) => (await s.pool.query("select id from cw_private.jobs where type='ai'")).rows.length;
+test("resposta da equipe pelo celular pausa a IA só por 10 minutos, como no agente original", async (t) => {
+  const s = await fullSetup(t, async () => {});
+  const c = await ingest(s);
+  const before = await aiJobs(s);
+  await ingest(s, IDS.primary, payload("celular1", "Já te respondo", true).data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "waiting_human");
+  await ingest(s, IDS.primary, payload("cliente2", "Ok").data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "waiting_human");
+  assert.equal(await aiJobs(s), before);
+  await backdate(s, c.id, 11);
+  await ingest(s, IDS.primary, payload("cliente3", "Ainda tá aí?").data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "ai");
+  assert.equal(await aiJobs(s), before + 1);
+  assert.equal((await s.pool.query("select status from cw_handoffs where conversation_id=$1", [c.id])).rows[0].status, "resolved");
+});
+test("equipe que continua falando mantém a pausa; quem clicou Assumir não perde o controle", async (t) => {
+  const s = await fullSetup(t, async () => {});
+  const c = await ingest(s);
+  await ingest(s, IDS.primary, payload("celular1", "Já te respondo", true).data);
+  await backdate(s, c.id, 11);
+  await ingest(s, IDS.primary, payload("celular2", "Qual o endereço?", true).data);
+  await ingest(s, IDS.primary, payload("cliente2", "Rua X, 10").data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "waiting_human");
+  await s.engine.command(USERS.alice, c.id, "claim", {}, randomUUID());
+  await backdate(s, c.id, 30);
+  await ingest(s, IDS.primary, payload("cliente3", "Oi?").data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "human");
+});
+test("aviso de status do painel não tira a conversa da IA", async (t) => {
+  const s = await fullSetup(t, async () => {});
+  const c = await ingest(s);
+  await ingest(s, IDS.primary, payload("aviso1", "✅ Oi, Vandi! Seu pedido *#283* está pronto! Pode vir buscar quando quiser 😄", true).data);
+  assert.equal((await s.engine.context(s.pool, c.id)).state, "ai");
+  assert.equal((await s.pool.query("select id from cw_handoffs")).rows.length, 0);
+});

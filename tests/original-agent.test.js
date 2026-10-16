@@ -18,7 +18,7 @@ const services={
  async salvarMensagem(phone,role,content){await scopeStore.current().recordHistory(role,content);},
  async verificarPausa(){return Boolean(scopeStore.current()?.handoffReason);},
  async pausarAtendimento(phone,ms,reason){scopeStore.current().requestHandoff(reason);},
- async criarAlertaAtendimento(phone,name,reason){scopeStore.current().requestHandoff(reason);},
+ async criarAlertaAtendimento(){},
  async buscarLojaAberta(){return true;},
  async garantirCliente(){},
  async buscarCupomAtivoPorTelefone(){return null;},

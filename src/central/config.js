@@ -30,6 +30,10 @@ function configuration(env = process.env) {
         : "password",
     openAccessUserId: env.CENTRAL_OPEN_USER_ID || "",
     fullAgent: env.CENTRAL_FULL_AGENT === "true",
+    // Mesma pausa do agente original: a equipe respondeu pelo celular ou o
+    // agente chamou alguém, e depois disso a IA volta sozinha. Sem prazo, o
+    // cliente ficava sem resposta até alguém lembrar de abrir a central.
+    pauseMinutes: Number(env.PAUSA_ATENDENTE_MIN || 10),
     internalAllowedCidrs: (env.CENTRAL_ALLOWED_CIDRS || "")
       .split(",")
       .map((v) => v.trim())

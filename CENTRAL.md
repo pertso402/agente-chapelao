@@ -11,7 +11,7 @@ A central abre diretamente pelo link, sem e-mail, senha, escolha de perfil ou at
 3. Responder, devolver à fila, devolver à IA ou encerrar.
 4. Ao devolver à IA, ela aguarda a próxima mensagem do cliente.
 
-O controle humano persiste após recarregar ou fechar o navegador. Ativar a IA da instância não retira chamados existentes da fila. Enquanto o agente está finalizando uma operação de pedido, Assumir pode solicitar alguns segundos de espera; a coordenação evita duas ações simultâneas sobre o mesmo pedido.
+O controle humano persiste após recarregar ou fechar o navegador. Isso vale para quem clicou Assumir. Quando a equipe responde pelo celular ou o agente chama alguém (chamar_atendente), a conversa só fica pausada como no agente original: na primeira mensagem do cliente depois de PAUSA_ATENDENTE_MIN (padrão 10) minutos sem a equipe falar, a IA volta sozinha. O pedido de taxa de entrega não pausa a IA, porque ela precisa entregar o valor quando alguém digitá-lo no painel de pedidos. Os avisos "Seu pedido #N..." do painel não contam como resposta da equipe. Ativar a IA da instância não retira chamados existentes da fila. Enquanto o agente está finalizando uma operação de pedido, Assumir pode solicitar alguns segundos de espera; a coordenação evita duas ações simultâneas sobre o mesmo pedido.
 
 | Número | Funcionamento |
 | --- | --- |
