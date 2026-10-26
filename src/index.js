@@ -181,14 +181,18 @@ function pingDeLocalizacaoRepetido(telefone) {
 // que tinha confirmado, mas nada acontecia). Agora aceita a palavra
 // afirmativa como INÍCIO da frase, e rejeita explicitamente frases com
 // ressalva (deixando "sim, mas troca o refrigerante" cair pro agente).
+// Sem o "sim" digitado errado e os "pode"/"fechado" do dia a dia, o código não
+// reconhecia a confirmação, a mensagem caía na LLM e ela mandava o resumo de
+// novo — o cliente via o pedido de confirmação duas vezes (Pedro, 26/10: "Sm").
 const CONFIRMACOES_EXATAS = new Set([
-  'sim', 'simm', 's', '1', 'confirmar', 'confirma', 'confirmo',
-  'pode confirmar', 'pode fechar', 'fechar', 'fechou', 'isso', 'isso mesmo',
-  'ta certo', 'certo', 'correto', 'ok', 'okay', 'beleza', 'blz', 'pode ser',
+  'sim', 'simm', 's', 'sm', 'si', 'ss', 'sin', 'sim sim', '1', 'confirmar', 'confirma', 'confirmo', 'confirmado',
+  'pode confirmar', 'pode fechar', 'pode', 'pode sim', 'pode mandar', 'manda', 'pode fazer', 'faz', 'fechar', 'fechou', 'fechado',
+  'isso', 'isso mesmo', 'isso ai', 'exato', 'ta certo', 'certo', 'correto', 'ok', 'okay', 'oki', 'beleza', 'blz', 'pode ser',
+  'claro', 'bora', 'aham', 'uhum', 'yes', 'perfeito', 'ta otimo', 'otimo', 'ta bom', 'tudo certo',
 ]);
 const CONFIRMACOES_PREFIXO = [
-  'sim', 'confirmo', 'confirma', 'pode confirmar', 'pode fechar', 'fechar',
-  'fechou', 'isso mesmo', 'isso', 'ta certo', 'certo', 'correto', 'beleza', 'pode ser',
+  'sim', 'confirmo', 'confirma', 'pode confirmar', 'pode fechar', 'pode mandar', 'pode fazer', 'pode sim', 'fechar',
+  'fechou', 'fechado', 'isso mesmo', 'isso', 'ta certo', 'certo', 'correto', 'beleza', 'pode ser', 'claro', 'perfeito', 'ok', 'tudo certo',
 ];
 const RESSALVA = /\b(mas|so que|so quero|quero mudar|muda|troca|corrige|corrigir|errado|espera|pera|calma|antes|na verdade|ainda nao|primeiro)\b/;
 
@@ -217,6 +221,8 @@ function ehConfirmacao(texto) {
   if (!t) return false;
   if (RESSALVA.test(t)) return false;
   if (CONFIRMACOES_EXATAS.has(t)) return true;
+  // "simmm", "ssim", "siim": o sim esticado ou com tecla repetida.
+  if (/^s+i*m+$/.test(t)) return true;
   return CONFIRMACOES_PREFIXO.some((p) => t.startsWith(`${p} `) || t.startsWith(`${p},`));
 }
 

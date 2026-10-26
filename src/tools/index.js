@@ -321,8 +321,11 @@ async function executarTool(nome, args, contexto = {}) {
       // Nome sem perguntar: o do último pedido, ou o do WhatsApp quando parece
       // nome de gente. Só pede se nenhum dos dois servir (avaliarRascunho
       // continua exigindo nome — a comanda precisa de um).
+      // Estado de antes desta chamada: decide o nome automático e se algo
+      // mudou de verdade (ver "nada mudou" mais abaixo).
+      const antes = await db.carregarRascunho(telefone).catch(() => null);
       if (!campos.nome_cliente) {
-        const atual = await db.carregarRascunho(telefone).catch(() => null);
+        const atual = antes;
         if (!atual?.nome_cliente && (campos.itens || parseItens(atual?.itens).length)) {
           let nome = null;
           try { nome = await db.nomeConhecido(telefone, contexto.pushName); } catch { /* segue sem nome: o agente pergunta */ }
@@ -447,6 +450,22 @@ async function executarTool(nome, args, contexto = {}) {
         // resumo sair mais caro, sem ninguém entender por quê.
         if (comboAtivo && !p.combo) {
           resumo.ATENCAO_combo_nao_aplicado = `Os itens do pedido não batem com a composição do ${comboAtivo.nome}, então o preço saiu avulso. Confira com o cliente o que ele quer: monte a composição exata do combo, ou siga avulso e NÃO cite mais o preço do combo.`;
+        }
+
+        // Regravar o que já estava no pedido ("Pix" com o pagamento já em PIX)
+        // devolvia o resumo com ordem de copiar — e o cliente recebia o pedido
+        // de confirmação duas vezes. Pedido já pronto + nada mudou = o resumo
+        // já está na conversa; o agente só lembra do SIM.
+        const CAMPOS_DO_PEDIDO = ['itens', 'itens_brinde', 'tipo_entrega', 'endereco', 'forma_pagamento', 'troco_para', 'combo_id', 'observacao'];
+        const normal = (v) => (typeof v === 'string' ? v : JSON.stringify(v ?? null));
+        const nadaMudou = Object.keys(campos).length > 0 &&
+          antes?.etapa_atual === 'aguardando_confirmacao' &&
+          CAMPOS_DO_PEDIDO.every(k => normal(antes?.[k]) === normal(rascunho[k]));
+        if (nadaMudou) {
+          resumo.status = 'PRONTO_E_RESUMO_JA_ENVIADO';
+          resumo.total = fmtBRL(p.total);
+          resumo.instrucao_final = 'Nada mudou no pedido e o resumo com o total JÁ foi enviado ao cliente. NÃO reenvie o resumo. Responda em UMA frase curta (respondendo o que ele disse, se for o caso) e termine com "é só me mandar um *SIM* que eu já mando pra cozinha 😊".';
+          return JSON.stringify(resumo);
         }
 
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';

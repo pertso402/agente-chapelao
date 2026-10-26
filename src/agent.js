@@ -277,7 +277,7 @@ Não invente promessas de prazo, entrega ou disponibilidade que nenhuma tool te 
 // Estado do pedido + regras que mudam por conversa. Vai como uma segunda
 // mensagem de sistema, logo antes da fala do cliente.
 
-function montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje = []) {
+function montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje = [], resumoJaEnviado = false) {
   const partes = [];
 
   if (rascunho) {
@@ -294,7 +294,12 @@ function montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje = []) {
 
     partes.push(`## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`);
 
-    if (av.completo) {
+    if (av.completo && resumoJaEnviado) {
+      // Sem isto, qualquer mensagem depois do resumo ("Pix", "Adriana", "já já
+      // passo aí") virava o MESMO resumo de novo — o cliente via a confirmação
+      // repetida e achava que o primeiro SIM não tinha valido.
+      partes.push('✅ TUDO COLETADO e o RESUMO JÁ FOI ENVIADO na sua última mensagem, pedindo o SIM. NÃO reenvie o resumo igual. Se o cliente MUDOU algo (item, tamanho, entrega/retirada, endereço, pagamento), chame salvar_dados_pedido com a mudança e responda com o RESUMO_FINAL_TEXTO_EXATO novo. Se ele só repetiu o que já está no pedido, comentou algo ou fez uma pergunta, responda em UMA frase curta e termine com "é só me mandar um *SIM* que eu já mando pra cozinha 😊".');
+    } else if (av.completo) {
       partes.push('✅ TUDO COLETADO. Se você ainda não recebeu o RESUMO_FINAL_TEXTO_EXATO nesta rodada, chame salvar_dados_pedido (pode ser sem nenhum campo) para recebê-lo, e responda com ele copiado. NÃO monte o resumo por conta própria.');
     } else {
       partes.push(`⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural, uma coisa de cada vez.`);
@@ -652,9 +657,13 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   let anteriores = (historico || []).map(h => ({ role: h.role, content: h.content }));
   while (anteriores.length && anteriores[0].role !== 'user') anteriores.shift();
 
+  // A última fala do agente já foi o resumo pedindo SIM?
+  const ultimaDoAgente = [...anteriores].reverse().find(m => m.role === 'assistant')?.content || '';
+  const resumoJaEnviado = /Confira seu pedido/.test(String(ultimaDoAgente));
+
   const montarMensagens = () => [
     { role: 'system', content: SYSTEM_ESTATICO },
-    { role: 'system', content: montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje) },
+    { role: 'system', content: montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje, resumoJaEnviado) },
     ...anteriores,
     { role: 'user', content: mensagemUsuario },
   ];
