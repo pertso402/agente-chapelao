@@ -1,7 +1,7 @@
 "use strict";
 const { randomUUID } = require("node:crypto");
 const { transaction, withLocks } = require("./database");
-const { assert, isCurrent } = require("./domain");
+const { assert, isCurrent, isControlCurrent } = require("./domain");
 const { IDS } = require("./config");
 const context = require("./legacy-context");
 let runtimeEngine = null;
@@ -25,12 +25,32 @@ async function phoneLock(q, phone) {
     await new Promise(r=>setTimeout(r,50));
   }
 }
+// A mensagem deste job, como foi gravada na central.
+async function currentInbound(q,c,job){
+  const id=job.payload?.providerMessage?.key?.id;
+  if(!id)return null;
+  return (await q.query("select id,kind,text,created_at from cw_messages where conversation_id=$1 and provider_id=$2 and direction='in' limit 1",[c.id,id])).rows[0]||null;
+}
+// Texto que chegou depois de outro texto: o job mais novo responde pelos dois
+// (ver burst abaixo), então este pode desistir. Mídia nunca desiste — áudio e
+// comprovante têm tratamento próprio e se perderiam se fossem pulados.
+async function superseded(q,c,job){
+  const current=await currentInbound(q,c,job);
+  if(!current||current.kind!=="text")return false;
+  const newer=await q.query("select 1 from cw_messages where conversation_id=$1 and direction='in' and kind='text' and created_at>$2 limit 1",[c.id,current.created_at]);
+  return newer.rows.length>0;
+}
+async function shouldRun(q,c,job){
+  if(!isControlCurrent(c,c,job.payload))return false;
+  if(isCurrent(c,c,job.payload))return true;
+  return !(await superseded(q,c,job));
+}
 async function run(engine, job) {
   const initial=await engine.context(engine.pool,job.conversation_id);
-  if(!isCurrent(initial,initial,job.payload))return;
+  if(!(await shouldRun(engine.pool,initial,job)))return;
   return withLocks(engine.pool,initial.instance_id,initial.chat_jid,async q=>{
     let c=await engine.context(q,initial.id);
-    if(!isCurrent(c,c,job.payload))return;
+    if(!(await shouldRun(q,c,job)))return;
     await engine.checkLease(q,job);
     const previous=await q.query("select status from cw_private.legacy_runs where decision_key=$1",[job.dedup_key]);
     if(previous.rows[0]?.status==="done"||previous.rows[0]?.status==="uncertain")return;
@@ -50,6 +70,18 @@ async function run(engine, job) {
       return;
     }
     await phoneLock(q,c.phone);
+    // Mensagens picadas ("Média" / "arroz, feijão" / "frango") viram UMA
+    // rodada, como no agruparMensagem do agente original: os textos que
+    // chegaram desde a última rodada e foram cobertos por este job seguem
+    // juntos, e o agente lê o pedido inteiro em vez de só o último pedaço.
+    const current=await currentInbound(q,c,job);
+    const lastRun=(await q.query("select max(started_at) as t from cw_private.legacy_runs where conversation_id=$1",[c.id])).rows[0]?.t||null;
+    const burst=current&&current.kind==="text"
+      ? (await q.query(
+          "select id,text from cw_messages where conversation_id=$1 and cycle=$2 and direction='in' and kind='text' and id<>$3 and created_at<=$4 and created_at>$4::timestamptz-interval '3 minutes' and ($5::timestamptz is null or created_at>$5) order by created_at,id",
+          [c.id,c.cycle,current.id,current.created_at,lastRun],
+        )).rows.filter(m=>m.text&&m.text.trim())
+      : [];
     await q.query("insert into cw_private.legacy_runs(decision_key,restaurant_id,instance_id,conversation_id,status) values($1,$2,$3,$4,'running')",[job.dedup_key,c.restaurant_id,c.instance_id,c.id]);
     const texts=[];
     let scope,uncertain=false;
@@ -57,9 +89,12 @@ async function run(engine, job) {
       const loadHistory=engine.loadLegacyHistory||require("../services/supabase").carregarHistorico;
       const prior=await loadHistory(c.phone,32);
       const recent=(await q.query(
-        "select id,direction,author,text,created_at from cw_messages where conversation_id=$1 and cycle=$2 and status in ('received','accepted','delivered','read') order by created_at desc,id desc limit 40",[c.id,c.cycle],
+        // pending/sending entram: a resposta da rodada anterior pode ainda não
+        // ter saído, e sem ela no histórico o agente pergunta de novo.
+        "select id,direction,author,text,created_at from cw_messages where conversation_id=$1 and cycle=$2 and status in ('received','accepted','delivered','read','pending','sending') order by created_at desc,id desc limit 40",[c.id,c.cycle],
       )).rows.reverse();
       const ids=new Set(prior.map(m=>m.central_message_id).filter(Boolean));
+      for(const m of burst)ids.add(m.id); // entram no texto juntado, não como falas soltas
       const history=[
         ...prior,
         ...recent.filter(m=>!ids.has(m.id)).map(m=>({
@@ -80,7 +115,10 @@ async function run(engine, job) {
           const entry={role,content,ts:Date.now(),central_message_id:role==="user"?this.currentMessageId:undefined};
           const existing=role==="user"?this.history.findIndex(m=>m.central_message_id===this.currentMessageId):-1;
           if(existing>=0)this.history[existing]=entry;else this.history.push(entry);
-          if(role==="user"&&this.currentMessageId)
+          // Texto juntado não sobrescreve a mensagem no painel: ela continua
+          // mostrando só o que o cliente mandou nela. A transcrição de áudio,
+          // sim, substitui o "[audio]".
+          if(role==="user"&&this.currentMessageId&&!burst.length)
             await q.query("update cw_messages set text=$2 where id=$1 and conversation_id=$3",[this.currentMessageId,String(content).slice(0,16000),c.id]);
         },
       };
@@ -89,6 +127,7 @@ async function run(engine, job) {
       const msg=extract({data});
       assert(msg&&!msg.fromMe,422,"Evento sem mensagem de cliente.");
       msg.telefone=c.phone;
+      if(burst.length)msg.texto=[...burst.map(m=>m.text.trim()),String(msg.texto||"").trim()].filter(Boolean).join("\n");
       await context.run(scope,()=>processor(msg,job.dedup_key));
     }catch{
       uncertain=true;
@@ -98,7 +137,9 @@ async function run(engine, job) {
     await transaction(q,async()=>{
       await engine.checkLease(q,job);
       c=await engine.context(q,c.id);
-      if(!isCurrent(c,c,job.payload))return;
+      // A rodada já gravou rascunho/pedido: a resposta sai mesmo que o cliente
+      // tenha escrito de novo no meio. Só a tomada humana a descarta.
+      if(!isControlCurrent(c,c,job.payload))return;
       const text=texts.join("\n\n");
       if(scope.handoffReason||text.length>16000){
         await engine.handoff(q,c,uncertain?"legacy_uncertain":"legacy_handoff",scope.handoffReason||"Resposta extensa: conferir com a equipe.");

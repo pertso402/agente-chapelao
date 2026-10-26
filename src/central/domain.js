@@ -65,6 +65,20 @@ function isCurrent(c, i, s) {
     String(i.config_epoch) === String(s.config_epoch)
   );
 }
+// Igual a isCurrent, mas sem exigir que o cliente esteja calado. Serve para a
+// resposta do agente original: quando ela fica pronta, o pedido já foi gravado
+// (rascunho, confirmação, PIX). Descartar o texto porque o cliente mandou outra
+// mensagem no meio deixava o cliente sem "Pedido #294 confirmado" e fazia o
+// agente perguntar de novo o que já tinha anotado. Só a tomada humana (epoch)
+// ou a IA desligada invalidam a resposta.
+function isControlCurrent(c, i, s) {
+  return (
+    c.state === "ai" &&
+    i.ai_enabled &&
+    String(c.control_epoch) === String(s.control_epoch) &&
+    String(i.config_epoch) === String(s.config_epoch)
+  );
+}
 function deliveryStatus(current, incoming) {
   const rank = {
     pending: 0,
@@ -129,6 +143,7 @@ module.exports = {
   secretEqual,
   uuid,
   isCurrent,
+  isControlCurrent,
   deliveryStatus,
   validateDecision,
 };

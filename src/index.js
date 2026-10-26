@@ -19,12 +19,13 @@ const {
   buscarInfo, buscarVideoBuffet, criarPedidoCompleto, tentarIniciarPagamento,
   buscarCupomAtivoPorTelefone,
   garantirCliente, verificarPausa, pausarAtendimento, criarAlertaAtendimento,
+  pedidosDeHoje,
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   reivindicarFollowups, reivindicarTravados,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido, gerarFollowup, modeloEmUso, relatorioDeConsumo } = require('./agent');
 const { comRetry } = require('./utils/retry');
-const { normalizar, montarResumoFinal, descreverFaltando, avaliarRascunho } = require('./utils/pedido');
+const { normalizar, montarResumoFinal, descreverFaltando, avaliarRascunho, parseItens, carrinhoJaVirouPedido } = require('./utils/pedido');
 const { capturarRespostaObvia, pedeConvenio } = require('./utils/intencao');
 const {
   PAUSA_ATENDENTE_MS, MAX_FALHAS_AUDIO, fmtBRL, money,
@@ -217,6 +218,22 @@ function ehConfirmacao(texto) {
   if (RESSALVA.test(t)) return false;
   if (CONFIRMACOES_EXATAS.has(t)) return true;
   return CONFIRMACOES_PREFIXO.some((p) => t.startsWith(`${p} `) || t.startsWith(`${p},`));
+}
+
+// "Ok", "obrigado", "👍": a pessoa só está reconhecendo o que ouviu. Não entra
+// "sim"/"pode" de propósito — esses respondem pergunta ("posso colocar a
+// Coca?") e ignorá-los perderia a resposta.
+const RECONHECIMENTOS = new Set([
+  'ok', 'okay', 'oki', 'blz', 'beleza', 'obrigado', 'obrigada', 'obg', 'brigado', 'brigada',
+  'valeu', 'vlw', 'ta bom', 'ta', 'tudo bem', 'aguardo', 'fico no aguardo', 'show', 'top',
+  'perfeito', 'entendi', 'certo', 'ok obrigado', 'ok obrigada', 'ok obg', 'tranquilo', 'positivo',
+]);
+function ehSoReconhecimento(texto) {
+  const bruto = String(texto || '').trim();
+  if (!bruto) return false;
+  if (/^[\p{Extended_Pictographic}\p{Emoji_Modifier}‍️\s]+$/u.test(bruto)) return true;
+  const t = normalizar(bruto).replace(/[^\p{L}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  return RECONHECIMENTOS.has(t);
 }
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
@@ -495,7 +512,7 @@ async function processarMensagem(msg, requestId) {
     }).catch(err => logger.warn('rascunho/stamp-user-falhou', err.message, { requestId, telefone }));
 
     // ── Estado ──────────────────────────────────────────────────────────────
-    const [historico, rascunhoCru, ofertaAtiva] = await Promise.all([
+    const [historico, rascunhoCarregado, ofertaAtiva, pedidosHoje] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
       carregarRascunho(telefone),
       buscarCupomAtivoPorTelefone(telefone).catch((e) => {
@@ -504,7 +521,23 @@ async function processarMensagem(msg, requestId) {
         logger.warn('oferta/buscar-falhou', e.message, { requestId, telefone });
         return null;
       }),
+      pedidosDeHoje(telefone).catch((e) => {
+        logger.warn('pedidos-hoje/buscar-falhou', e.message, { requestId, telefone });
+        return [];
+      }),
     ]);
+
+    // Carrinho que a equipe já fechou à mão no painel: some, senão o agente
+    // reenvia o resumo a cada "já paguei" e um comprovante tardio vira pedido
+    // duplicado.
+    let rascunhoCru = rascunhoCarregado;
+    if (carrinhoJaVirouPedido(rascunhoCru, pedidosHoje)) {
+      logger.info('rascunho/ja-virou-pedido', 'Carrinho já atendido por pedido gravado depois dele — descartado', {
+        requestId, telefone, etapa: rascunhoCru.etapa_atual, pedido: pedidosHoje[0]?.numero_pedido,
+      });
+      await limparRascunho(telefone).catch(() => {});
+      rascunhoCru = null;
+    }
     // ── A resposta óbvia é gravada pelo CÓDIGO, não pela LLM ─────────────────
     // A cliente respondeu "Entrega" três vezes, o agente perguntou três vezes,
     // e tipo_entrega ficou NULL no banco o tempo todo: a LLM leu, seguiu a
@@ -830,11 +863,25 @@ async function processarMensagem(msg, requestId) {
       return;
     }
 
+    // ── Esperando a equipe digitar a taxa ────────────────────────────────────
+    // "Ok", "👍", "blz" enquanto a entrega é calculada não pedem resposta: o
+    // aviso com o total sai sozinho assim que alguém digitar o valor. Mandar
+    // isso pra LLM era o que produzia resposta vazia e, em seguida, "chamei um
+    // atendente" — 3 dos 4 casos da semana de 20/10 (Rhayy, Kamilly, salmo 91).
+    const esperandoTaxa = rascunho?.taxa_status === 'pendente' && rascunho?.taxa_entrega == null;
+    const ultimaDoAgente = [...(historico || [])].reverse().find(h => h.role === 'assistant')?.content || '';
+    if (esperandoTaxa && ehSoReconhecimento(conteudo) && !/\?\s*\S{0,4}\s*$/.test(ultimaDoAgente)) {
+      logger.info('taxa/aguardando-ack', 'Cliente só reconheceu enquanto a taxa é calculada — sem resposta', { requestId, telefone });
+      return;
+    }
+
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
     const pararDigitandoAgente = manterDigitando(telefone);
     try {
       const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-      const { texto, atendenteChamado, mostrouCardapio } = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva);
+      const { texto, atendenteChamado, mostrouCardapio } = await rodarAgente(
+        msgParaAgente, historico, rascunho, requestId, telefone, ofertaAtiva, { pushName, pedidosHoje },
+      );
 
       // Cliente perguntou o cardápio → manda o vídeo do buffet de hoje ANTES
       // do texto. Ver a comida vende mais que ler a lista, e o vídeo chegando
@@ -846,9 +893,19 @@ async function processarMensagem(msg, requestId) {
       // texto já responde o que a pessoa perguntou.
 
       if (!texto) {
-        // Resposta vazia é sintoma de algo errado (raciocínio consumiu todo o
-        // orçamento, tool travou). Pedir "pode repetir?" só empurra o problema.
-        logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
+        // O agente já tentou de novo com instrução explícita (rodarAgente) e
+        // ainda assim não saiu mensagem. Antes de chamar gente:
+        //  - esperando a taxa: o cliente só precisa saber que está vindo;
+        //  - "ok"/"obrigado"/emoji: silêncio é a resposta certa;
+        //  - qualquer outra coisa: aí sim, alguém precisa olhar.
+        logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone, esperandoTaxa });
+        if (esperandoTaxa) {
+          await responder(telefone,
+            'Já pedi o valor da entrega pra equipe — assim que sair eu te mando o total fechado 😊',
+            { requestId, etapa: 'taxa/aguardando' });
+          return;
+        }
+        if (ehSoReconhecimento(conteudo)) return;
         await escalarParaAtendente(telefone, '🤖 [ERRO TÉCNICO] O agente não produziu resposta para a mensagem do cliente.', requestId, {
           mensagemCliente: MSG_ATENDENTE_PADRAO,
         });
@@ -956,6 +1013,12 @@ async function pollarFollowups() {
   // Reivindica pela janela mais larga e filtra aqui: o banco não sabe a regra
   // de temperatura, e uma query só evita duas rodadas de claim concorrentes.
   const candidatos = (await reivindicarFollowups(SILENCIO_QUENTE_MS)).filter(r => {
+    // Sem carrinho não há pedido pra retomar. Era daqui que saíam "Quando
+    // puder, me confirma pra eu fechar seu pedido" pra quem já tinha recebido a
+    // marmita (o "obrigado" depois do pedido recria um rascunho vazio) e os
+    // "Qualquer coisa, estou por aqui" repetidos depois de um "valeu".
+    // Fica marcado como enviado: não volta pra fila.
+    if (!parseItens(r.itens).length) return false;
     const silencioMs = Date.now() - new Date(r.ultima_msg_em).getTime();
     const limite = ETAPAS_QUENTES.has(r.etapa_atual) ? SILENCIO_QUENTE_MS : SILENCIO_FRIO_MS;
     if (silencioMs >= limite) return true;
@@ -970,6 +1033,17 @@ async function pollarFollowups() {
     try {
       if (await verificarPausa(telefone)) {
         logger.info('followup/pausado', 'Atendimento pausado, follow-up não enviado', { requestId, telefone });
+        continue;
+      }
+
+      // Pedido gravado hoje há pouco (pelo SIM ou pela equipe): o cliente já
+      // está atendido. "Só pra confirmar: a pequena fica só com dobradinha?"
+      // depois da marmita pronta (Meyreh, 23/10) é exatamente o que não pode.
+      const pedidos = (await pedidosDeHoje(telefone).catch(() => [])) || [];
+      const TRES_HORAS = 3 * 60 * 60_000;
+      if (carrinhoJaVirouPedido(rascunho, pedidos) ||
+          pedidos.some(p => Date.now() - new Date(p.created_at).getTime() < TRES_HORAS)) {
+        logger.info('followup/ja-tem-pedido', 'Cliente com pedido recente — follow-up não enviado', { requestId, telefone });
         continue;
       }
 

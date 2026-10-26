@@ -5,6 +5,7 @@ const {
   assert,
   digest,
   isCurrent,
+  isControlCurrent,
   deliveryStatus,
   validateDecision,
 } = require("./domain");
@@ -661,7 +662,7 @@ class Engine {
               c.inbound_seq +
               ":" +
               inst.config_epoch,
-            1500,
+            this.aiDelay(msg.kind),
           );
         return { inserted: true };
       }),
@@ -709,6 +710,15 @@ class Engine {
       "update cw_instances set connection_state=$2,checked_at=now() where id=$1 and restaurant_id=$3",
       [id, state, this.config.restaurantId],
     );
+  }
+  // Texto espera o cliente parar de digitar antes de responder, como o
+  // agruparMensagem do agente original (8s que reiniciam a cada mensagem nova:
+  // o job antigo vira obsoleto e só o último roda). Com 1,5s o agente
+  // respondia no meio da rajada ("Média" / "arroz, feijão" / "frango") e uma
+  // em cada cinco respostas acabava descartada ou repetida. Mídia não espera.
+  aiDelay(kind) {
+    if (!this.config.fullAgent || kind !== "text") return 1500;
+    return (this.config.groupSeconds || 8) * 1000;
   }
   async runAI(job) {
     if (this.config.fullAgent) return require("./full-agent").run(this, job);
@@ -853,7 +863,7 @@ class Engine {
         }
         let valid =
           message.author === "ai"
-            ? isCurrent(fresh, fresh, message)
+            ? (this.config.fullAgent ? isControlCurrent : isCurrent)(fresh, fresh, message)
             : fresh.state === "human" &&
               fresh.assignee_id === message.author_id &&
               String(fresh.control_epoch) === String(message.control_epoch);

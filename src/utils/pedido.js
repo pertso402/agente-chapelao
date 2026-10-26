@@ -76,7 +76,7 @@ function avaliarRascunho(r = {}) {
 
 const LABEL_FALTANDO = {
   itens:           'os itens do pedido',
-  nome:            'o nome completo do cliente',
+  nome:            'o nome do cliente (pra chamar na retirada/entrega)',
   tipo_entrega:    'se é entrega (delivery) ou retirada',
   endereco:        'o endereço de entrega',
   forma_pagamento: 'a forma de pagamento (pix, dinheiro ou cartão)',
@@ -221,6 +221,17 @@ function montarResumoFinal({ itens, brindes, tipoEntrega, endereco, formaPagamen
   return linhas.join('\n');
 }
 
+// O carrinho já foi atendido por um pedido gravado DEPOIS da última mudança
+// nele — quase sempre a equipe fechando o pedido à mão no painel. Sem esta
+// checagem o rascunho ficava vivo e o agente reenviava o resumo a cada "já
+// paguei" / "👍" (salmo 91, 26/10: quatro vezes seguidas), e um comprovante
+// tardio podia gerar um segundo pedido.
+function carrinhoJaVirouPedido(rascunho, pedidos) {
+  if (!rascunho?.itens_atualizados_em || rascunho.etapa_atual === 'processando') return false;
+  const desde = new Date(rascunho.itens_atualizados_em).getTime();
+  return (pedidos || []).some(p => new Date(p.created_at).getTime() > desde);
+}
+
 const ROTULO_PAGAMENTO = { pix: 'PIX', dinheiro: 'Dinheiro', cartao: 'Cartão' };
 function rotuloPagamento(f) {
   return ROTULO_PAGAMENTO[String(f || '').toLowerCase()] || f || '—';
@@ -229,4 +240,5 @@ function rotuloPagamento(f) {
 module.exports = {
   normalizar, parseItens, avaliarRascunho, descreverFaltando, calcularSubtotal,
   calcularTotais, montarResumoFinal, linhaTroco, rotuloPagamento, LABEL_FALTANDO,
+  carrinhoJaVirouPedido,
 };

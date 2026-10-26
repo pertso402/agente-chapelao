@@ -34,6 +34,8 @@ function configuration(env = process.env) {
     // agente chamou alguém, e depois disso a IA volta sozinha. Sem prazo, o
     // cliente ficava sem resposta até alguém lembrar de abrir a central.
     pauseMinutes: Number(env.PAUSA_ATENDENTE_MIN || 10),
+    // Mesma janela do agruparMensagem do agente original (AGRUPAR_MSG_SEG).
+    groupSeconds: Number(env.AGRUPAR_MSG_SEG || 8),
     internalAllowedCidrs: (env.CENTRAL_ALLOWED_CIDRS || "")
       .split(",")
       .map((v) => v.trim())

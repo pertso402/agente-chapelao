@@ -1017,3 +1017,63 @@ test("aviso de status do painel não tira a conversa da IA", async (t) => {
   assert.equal((await s.engine.context(s.pool, c.id)).state, "ai");
   assert.equal((await s.pool.query("select id from cw_handoffs")).rows.length, 0);
 });
+
+// ── Revisão 20–26/10 ─────────────────────────────────────────────────────────
+async function runAllAI(s) {
+  await due(s);
+  let job;
+  while ((job = await s.engine.lease())) {
+    if (job.type === "ai") await s.engine.runAI(job);
+    await s.pool.query("update cw_private.jobs set status='done' where id=$1", [job.id]);
+  }
+}
+test("mensagens picadas viram UMA rodada com o texto inteiro, como no agente original", async (t) => {
+  const textos = [];
+  const s = await fullSetup(t, async (msg) => { textos.push(msg.texto); });
+  const c = await ingest(s, IDS.primary, payload("p1", "Média").data);
+  await ingest(s, IDS.primary, payload("p2", "arroz, feijão, batata frita").data);
+  await ingest(s, IDS.primary, payload("p3", "frango assado").data);
+  await s.pool.query("update cw_messages set created_at=now()-make_interval(secs=>case provider_id when 'p1' then 6 when 'p2' then 4 else 2 end) where conversation_id=$1", [c.id]);
+  await runAllAI(s);
+  assert.deepEqual(textos, ["Média\narroz, feijão, batata frita\nfrango assado"]);
+});
+test("texto espera o cliente parar de digitar; mídia não espera", async (t) => {
+  const s = await fullSetup(t, async () => {});
+  assert.equal(s.engine.aiDelay("text"), 8000);
+  assert.equal(s.engine.aiDelay("audio"), 1500);
+});
+test("áudio não é pulado quando o cliente manda texto logo depois", async (t) => {
+  const tipos = [];
+  const s = await fullSetup(t, async (msg) => { tipos.push(msg.key.id); });
+  const audio = payload("a1").data; audio.message = { audioMessage: {} };
+  const c = await ingest(s, IDS.primary, audio);
+  await ingest(s, IDS.primary, payload("t1", "é isso").data);
+  await s.pool.query("update cw_messages set created_at=now()-interval '5 seconds' where provider_id='a1' and conversation_id=$1", [c.id]);
+  await runAllAI(s);
+  assert.deepEqual(tipos.sort(), ["a1", "t1"]);
+});
+test("resposta pronta do agente sai mesmo se o cliente escreveu no meio (Pedido #294 sumia)", async (t) => {
+  const s = await fullSetup(t, async (msg) => {
+    await require("../src/central/legacy-context").current().respond(msg.telefone, "✅ Pedido *#294* confirmado!");
+  });
+  const c = await ingest(s);
+  await due(s);
+  await s.engine.runAI(await s.engine.lease());
+  await s.pool.query("update cw_conversations set inbound_seq=inbound_seq+1 where id=$1", [c.id]);
+  const send = await s.engine.lease();
+  await s.engine.dispatch(send);
+  assert.equal(s.sends.length, 1);
+  assert.match(s.sends[0].text, /#294/);
+});
+test("tomada humana continua descartando a resposta pendente da IA", async (t) => {
+  const s = await fullSetup(t, async (msg) => {
+    await require("../src/central/legacy-context").current().respond(msg.telefone, "Anotei sua Média ✅");
+  });
+  const c = await ingest(s);
+  await due(s);
+  await s.engine.runAI(await s.engine.lease());
+  await s.engine.command(USERS.alice, c.id, "claim", {}, randomUUID());
+  const send = await s.engine.lease();
+  if (send) await s.engine.dispatch(send);
+  assert.equal(s.sends.length, 0);
+});

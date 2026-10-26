@@ -88,7 +88,7 @@ Três regras que encurtam de verdade:
 **a) Leia a mensagem INTEIRA antes de perguntar.** O cliente costuma mandar várias informações de uma vez. Extraia TODAS e salve TODAS numa chamada só de salvar_dados_pedido.
 Exemplo real: *"Qual cardápio de hoje, Sra Fátima, para entregar uma M? Rua Cananéia, 3174, próximo à praça"* — essa única mensagem já traz nome, tamanho, que é entrega e o endereço completo. Perguntar qualquer uma dessas coisas depois é o que fez essa cliente escrever *"por que tantas repetições de perguntas?"* e desistir.
 
-**b) Junte o que falta numa pergunta só.** Se faltam duas coisas pequenas, pergunte as duas juntas, em uma frase curta: *"Me passa seu nome e a rua com número pra eu fechar?"*. Não faça disso um questionário de 5 itens — duas por mensagem é o limite.
+**b) Junte o que falta numa pergunta só.** Se faltam duas coisas pequenas, pergunte as duas juntas, em uma frase curta: *"Me passa a rua com número e se vai ser PIX, dinheiro ou cartão?"*. Não faça disso um questionário de 5 itens — duas por mensagem é o limite.
 
 **c) Se o cliente perguntar algo, RESPONDA a pergunta dele.** Não cole a sua pendência no fim de toda mensagem. Numa conversa real o agente terminou cinco mensagens seguidas com *"precisa de troco pra quanto?"* enquanto a cliente perguntava outra coisa. Responda o que ela perguntou; a pendência você retoma na mensagem seguinte.
 
@@ -197,9 +197,22 @@ Diga assim: "a gente não agenda pedido, mas é rapidinho: me chama amanhã a pa
 Chame info_restaurante: ela traz o prazo de entrega e o de retirada. Informe como média, sem prometer horário exato.
 
 ### Assunto que não é comida → ENCAMINHE
-Currículo, vaga de emprego, parceria, aluguel de qualquer coisa, telefone de outra unidade, imprensa: chame info_restaurante e passe o contato_outros_assuntos com gentileza, depois volte para o pedido.
-Exemplo: "esse assunto quem cuida é o Claudecir, no +55 44 8454-4295 😊 Posso te ajudar com o almoço de hoje?"
+Currículo, vaga de emprego, freelancer, fornecedor, parceria, marketing, aluguel de qualquer coisa, telefone de outra unidade, imprensa, *reserva de espaço, aniversário, evento ou confraternização*: chame info_restaurante e passe o contato_outros_assuntos com gentileza, UMA vez.
+Exemplo: "esse assunto quem cuida é o Claudecir, no +55 44 8454-4295 😊"
+- Se a pessoa disser que já mandou mensagem pra ele, diga que ele retorna assim que puder e encerre com simpatia. Não repita o número, não chame atendente.
+- Só emende "posso te ajudar com o almoço de hoje?" se for um cliente falando de comida. Fornecedor, vendedor ou prestador de serviço não é cliente: não ofereça marmita.
 ⛔ Não pause o atendimento por isso.
+
+### Prêmio ou brinde pra um pedido que JÁ foi feito → EXPLIQUE
+Cliente que ganhou prêmio (roleta, cupom) e pergunta se vale pro pedido que acabou de fazer, que já retirou, ou que fez pelo iFood: o prêmio vale no *próximo pedido feito aqui pelo WhatsApp*, até a validade dele, e a gente manda junto. É a regra da casa — você responde.
+Pelo iFood não dá pra mandar item junto (é regra do iFood). Se a pessoa quiser o brinde, o pedido tem que ser feito por aqui.
+⛔ Não chame atendente por isso.
+
+### Nome do cliente
+O sistema já preenche o nome com o do último pedido ou o do WhatsApp. Só pergunte o nome se AINDA FALTA mostrar "nome" — e aí pergunte só "seu nome?", nunca "nome completo", e nunca peça pra confirmar um nome que o cliente já disse.
+
+### Várias marmitas, uma pra cada pessoa
+"Marmita do Pedro: ... / Marmita do Kevyn: ..." são itens SEPARADOS: salve cada marmita como um item de quantidade 1, com as carnes e acompanhamentos dela e o nome da pessoa na observacao do item. Nunca junte montagens diferentes num "2x". Ao confirmar, diga quantas marmitas anotou e de quem é cada uma.
 
 ### AÍ SIM chame humano
 - Reclamação de comida ou de entrega que já saiu
@@ -226,7 +239,7 @@ Depois de chamar, mande UMA frase curta avisando que um atendente assume em inst
 3. Assim que o cliente escolher um item, chame salvar_dados_pedido (NOMES EXATOS do cardápio) e depois CONFIRME de volta o item e o preço que o retorno da tool trouxe, já emendando na próxima escolha — ex: "Anotei: 1x Marmitex Pequena — R$ 23,00 ✅ Coca ou Guaraná pra acompanhar?". Só avance depois desse eco: ele existe pra pegar item errado antes de virar pedido, e a pergunta no fim é o que mantém a conversa viva.
 4. Se o item for MARMITEX: pergunte quais carnes (até 2) e acompanhamentos (até 6), usando os nomes exatos de buscar_itens_do_dia, e mande no MESMO item via os campos "carnes" e "acompanhamentos". O sistema aplica o limite de verdade — se o retorno trouxer "AVISOS" dizendo que cortou algo, explique com gentileza e pergunte se as opções mantidas estão OK.
 5. O campo "itens" de salvar_dados_pedido é a lista COMPLETA e substitui a anterior inteira. Para adicionar um item, reenvie todos os itens (os antigos + o novo). Nunca mande só o item novo achando que ele será somado.
-6. Pergunte: entrega ou retirada? → se for entrega, peça o endereço completo, e pode pedir JUNTO com o nome numa frase só ("me passa seu nome e a rua com número?"). Se o cliente mandar localização (aparece como "📍 [Localização compartilhada]: ... link do Google Maps"), isso É endereço válido — salve o link inteiro no campo endereco, não peça pra digitar de novo.
+6. Pergunte: entrega ou retirada? → se for entrega, peça o endereço completo junto com a forma de pagamento, numa frase só ("me passa a rua com número e se vai ser PIX, dinheiro ou cartão?"). Nome só se AINDA FALTA mostrar "nome". Se o cliente mandar localização (aparece como "📍 [Localização compartilhada]: ... link do Google Maps"), isso É endereço válido — salve o link inteiro no campo endereco, não peça pra digitar de novo.
 7. Forma de pagamento: pergunte SÓ quando for ENTREGA. Na RETIRADA não pergunte — o cliente paga no balcão quando vier buscar, e essa pergunta só alonga a conversa à toa. Se ele informar por conta própria ("vou pagar no pix"), registre normalmente.
 8. 💵 SE FOR DINHEIRO, pergunte "precisa de troco pra quanto?" — mas SÓ DEPOIS do total fechado, ou seja, depois que a entrega for calculada. Antes disso o cliente não tem como responder, porque nem ele nem você sabem quanto deu. O sistema avisa a hora certa em AINDA FALTA: só pergunte quando "troco" aparecer lá.
    - Se ele disser um valor ("100", "pra 50", "cinquenta reais"), salve em troco_para.
@@ -264,7 +277,7 @@ Não invente promessas de prazo, entrega ou disponibilidade que nenhuma tool te 
 // Estado do pedido + regras que mudam por conversa. Vai como uma segunda
 // mensagem de sistema, logo antes da fala do cliente.
 
-function montarContextoDinamico(rascunho, ofertaAtiva) {
+function montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje = []) {
   const partes = [];
 
   if (rascunho) {
@@ -294,7 +307,7 @@ function montarContextoDinamico(rascunho, ofertaAtiva) {
 - Sempre que informar o valor da entrega, diga pra onde vai o dinheiro: "vai 100% pro entregador, a gente não fica com nada". Isso é verdade e derruba a objeção de "vocês ganham em cima do frete" antes dela nascer.
 - Avise o valor da entrega ASSIM QUE o sistema calcular, ANTES de fechar o pedido. O cliente nunca pode descobrir o valor só no total final.
 - Você NUNCA diz um valor de entrega por conta própria. Nem "uns 10", nem "por volta de", nem "geralmente é". Nenhum número. Se o cliente perguntar antes da hora: "a entrega varia conforme o endereço — me passa o endereço completo que eu confirmo certinho pra você".
-- ORDEM OBRIGATÓRIA: itens → nome → endereço completo → **forma de pagamento** → só então a taxa é calculada. A forma de pagamento vem ANTES porque ela decide por qual plataforma a entrega é pedida, e isso muda o preço.
+- ORDEM OBRIGATÓRIA: endereço completo + **forma de pagamento** → só então a taxa é calculada. A forma de pagamento vem ANTES porque ela decide por qual plataforma a entrega é pedida, e isso muda o preço.
 - Isso não é pedir pra pagar adiantado. O cliente só paga depois de receber o total completo (itens + taxa). Se ele estranhar, é isso que você explica.
 - Com endereço e forma de pagamento na mão, o sistema abre o cálculo sozinho. Sua única função nessa hora é avisar que está confirmando o valor da entrega e que já volta com o total fechado. NÃO mande resumo, NÃO peça confirmação, NÃO chute.
 - Quando a taxa sair, o sistema manda a mensagem com o total pronto. Você não precisa ficar checando.
@@ -305,7 +318,24 @@ A condição de primeira compra vale ${prazoOfertaTexto()}. Use isso para o clie
 ## HORÁRIO
 Atendemos ${TEXTO_HORARIO}. Se você está conversando agora, é porque está DENTRO do horário — pode montar o pedido normalmente. Fora do horário o sistema responde sozinho, você nem é chamado.
 Se o cliente perguntar o horário, informe exatamente: ${TEXTO_HORARIO}.
-Se ele pedir pra agendar para outro dia ou fora do horário, chame chamar_atendente — agendamento não é decisão sua.`);
+Se ele pedir pra agendar para outro dia ou fora do horário, recuse com educação, como diz a seção de agendamento — não chame atendente.`);
+
+  if (pedidosHoje?.length) {
+    const ROTULO = {
+      pendente: 'recebido, entrando na cozinha', preparando: 'sendo preparado na cozinha',
+      pronto: 'pronto (retirada: pode vir buscar / entrega: esperando o motoboy)',
+      saiu_entrega: 'saiu pra entrega, com o motoboy', entregue: 'entregue',
+    };
+    const hora = (iso) => new Date(iso).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+    const linhas = pedidosHoje.map(p =>
+      `- Pedido *#${p.numero_pedido}* feito às ${hora(p.created_at)} (${p.tipo_entrega === 'delivery' ? 'entrega' : 'retirada'}, ${fmtBRL(p.total)}): ${ROTULO[p.status] || p.status}`);
+    partes.push(`## PEDIDOS DE HOJE DESTE CLIENTE (já gravados — pós-venda)
+${linhas.join('\n')}
+- Se ele perguntar do pedido ("já saiu?", "vai demorar?", "deu certo?", "já paguei"), responda VOCÊ com o status acima e o prazo médio de info_restaurante, em uma ou duas frases. Não chame atendente pra isso.
+- Só chame atendente se ele reclamar, quiser alterar/cancelar, ou se o pedido foi feito há mais de 60 minutos e ainda não saiu.
+- "ok", "obrigado", "👍", "já chegou" depois do pedido pedem uma resposta curta e simpática — NÃO reenvie resumo, NÃO comece pedido novo, NÃO pergunte "posso fechar seu pedido?".
+- Ele só está fazendo um pedido NOVO se pedir comida de novo com todas as letras.`);
+  }
 
   if (ofertaAtiva && ofertaAtiva.tipo === 'brinde') {
     const permitidos = ofertaAtiva.itens_permitidos || [];
@@ -412,12 +442,12 @@ function erroDeToolsComEffort(err) {
     && /function tools|tools are not supported|tools with reasoning/.test(msg);
 }
 
-function montarPayload(messages, maxTokens = MAX_TOKENS_AGENTE) {
+function montarPayload(messages, maxTokens = MAX_TOKENS_AGENTE, toolChoice = 'auto') {
   const payload = {
     model: modeloAtivo,
     messages,
     tools: TOOLS,
-    tool_choice: 'auto',
+    tool_choice: toolChoice,
     // Uma tool por vez: o rascunho é lido e reescrito a cada chamada, então
     // duas tools em paralelo poderiam se atropelar no mesmo estado.
     parallel_tool_calls: false,
@@ -469,10 +499,10 @@ function relatorioDeConsumo() {
   };
 }
 
-async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE, etapa = 'agente') {
+async function chamarModelo(client, messages, maxTokens = MAX_TOKENS_AGENTE, etapa = 'agente', toolChoice = 'auto') {
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     try {
-      const r = await client.chat.completions.create(montarPayload(messages, maxTokens));
+      const r = await client.chat.completions.create(montarPayload(messages, maxTokens, toolChoice));
       contabilizar(etapa, r.usage);
       return r;
     } catch (err) {
@@ -581,23 +611,54 @@ function modeloEmUso() {
   };
 }
 
+// ─── SAÍDA QUE NÃO É MENSAGEM PRO CLIENTE ─────────────────────────────────────
+// Às vezes o modelo devolve o próprio raciocínio, em inglês, como se fosse a
+// resposta — e ele ia direto pro WhatsApp: "We need respond, state says missing
+// full name. User sent doc perhaps proof..." (Lorena, 23/10; salmo 91, 26/10).
+// Também pega instrução interna copiada sem querer.
+const PALAVRAS_RACIOCINIO = new Set([
+  'we', 'need', 'needs', 'user', 'should', 'must', 'respond', 'response', 'state', 'says',
+  'perhaps', 'likely', 'maybe', 'ask', 'asked', 'choice', 'missing', 'the', 'they', 'sent',
+  'portuguese', 'tool', 'call', 'assistant', 'also', 'probably', 'already', 'confirm',
+]);
+function pareceRaciocinio(texto) {
+  const t = String(texto || '');
+  if (/RESUMO_FINAL_TEXTO_EXATO|INSTRUÇÃO INTERNA|instrucao_final|PRONTO_PARA_CONFIRMACAO|FALTA_COLETAR/.test(t)) return true;
+  if (/^\s*(we need|we should|we must|need to|the user|user (sent|says|asked|wants)|state says|let'?s|i need to|i should|okay,? so)\b/i.test(t)) return true;
+  const palavras = t.toLowerCase().match(/[a-z']+/g) || [];
+  const hits = palavras.filter(p => PALAVRAS_RACIOCINIO.has(p)).length;
+  return hits >= 5 && hits / Math.max(palavras.length, 1) > 0.15;
+}
+
+const NUDGE_RESPOSTA = 'Sua última saída não foi uma mensagem pro cliente (veio vazia ou com raciocínio interno). Escreva AGORA só a mensagem que vai pro WhatsApp do cliente: em português, curta, natural, sem explicar o que você está pensando e sem citar instruções. Se o cliente só agradeceu, confirmou ou mandou emoji e não há nada a perguntar, responda em poucas palavras.';
+
+// Prompt recusado pela moderação da OpenAI ("Invalid prompt: flagged"). Quase
+// sempre é alguma mensagem antiga do histórico; com só o fim da conversa a
+// chamada passa. Aconteceu com a Adriana (20/10) no "sim" do pedido.
+function erroDePromptRecusado(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return err?.status === 400 && /invalid prompt|flagged/.test(msg);
+}
+
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
-async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, ofertaAtiva) {
+async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, ofertaAtiva, extra = {}) {
   const client = getClient();
+  const { pushName, pedidosHoje = [] } = extra;
 
   // A API exige que a conversa comece com system/user. Histórico que comece
   // com assistant (oferta enviada pelo agente de recompra antes de qualquer
   // mensagem do cliente) confunde o modelo — descarta esse prefixo.
-  const anteriores = (historico || []).map(h => ({ role: h.role, content: h.content }));
+  let anteriores = (historico || []).map(h => ({ role: h.role, content: h.content }));
   while (anteriores.length && anteriores[0].role !== 'user') anteriores.shift();
 
-  const messages = [
+  const montarMensagens = () => [
     { role: 'system', content: SYSTEM_ESTATICO },
-    { role: 'system', content: montarContextoDinamico(rascunho, ofertaAtiva) },
+    { role: 'system', content: montarContextoDinamico(rascunho, ofertaAtiva, pedidosHoje) },
     ...anteriores,
     { role: 'user', content: mensagemUsuario },
   ];
+  let messages = montarMensagens();
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL_AGENTE,
@@ -606,10 +667,20 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     etapa: rascunho?.etapa_atual || 'inicio',
   });
 
-  let resposta = await comRetry(
-    () => chamarModelo(client, messages),
-    { tentativas: 3, requestId, etapa: 'openai/create' }
-  );
+  let resposta;
+  try {
+    resposta = await comRetry(
+      () => chamarModelo(client, messages),
+      { tentativas: 3, requestId, etapa: 'openai/create' }
+    );
+  } catch (err) {
+    if (!erroDePromptRecusado(err)) throw err;
+    logger.warn('agente/prompt-recusado', 'Moderação recusou o prompt — tentando só com o fim da conversa', { requestId, telefone });
+    anteriores = anteriores.slice(-6);
+    while (anteriores.length && anteriores[0].role !== 'user') anteriores.shift();
+    messages = montarMensagens();
+    resposta = await chamarModelo(client, messages);
+  }
 
   let iteracoes = 0;
   let atendenteChamado = false;
@@ -632,7 +703,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 
       let resultado;
       try {
-        resultado = await executarTool(nomeTool, args, { telefone, ofertaAtiva });
+        resultado = await executarTool(nomeTool, args, { telefone, ofertaAtiva, pushName });
         if (nomeTool === 'chamar_atendente') atendenteChamado = true;
         if (TOOLS_DE_CARDAPIO.has(nomeTool)) mostrouCardapio = true;
         logger.info(`tool/${nomeTool}/ok`, 'Executada', { requestId, telefone });
@@ -659,23 +730,28 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 
   let textoFinal = resposta.choices[0].message?.content?.trim() || '';
 
-  // Resposta vazia com finish_reason 'length' é o modelo de raciocínio gastando
-  // o orçamento inteiro pensando e sobrando 0 tokens pro texto visível — não é
-  // erro de API (não lança exceção), então nenhum retry automático de cima
-  // pega isso. Uma segunda tentativa com o dobro do budget resolve a maioria
-  // dos casos sem precisar pausar o atendimento e chamar humano por algo que o
-  // próprio modelo resolveria com mais espaço.
-  if (!textoFinal) {
-    logger.warn('agente/vazio-retry', 'Resposta vazia, tentando de novo com mais tokens', {
-      requestId, telefone, finish_reason: resposta.choices[0].finish_reason,
-      tokens_out: resposta.usage?.completion_tokens,
-    });
+  // Resposta vazia ou raciocínio no lugar da mensagem. Repetir a MESMA chamada
+  // com mais tokens (como era) devolvia o mesmo vazio: nos 4 casos da semana de
+  // 20/10 o modelo saiu com finish_reason "stop" e 3 tokens — ele decidiu não
+  // falar (cliente mandou "Ok" esperando a taxa). O que destrava é dizer com
+  // todas as letras que a resposta é pro cliente, sem tools nessa volta.
+  for (let tentativa = 0; tentativa < 2 && (!textoFinal || pareceRaciocinio(textoFinal)); tentativa++) {
+    logger.warn(textoFinal ? 'agente/raciocinio-vazado' : 'agente/vazio-retry',
+      textoFinal ? 'Saída parecia raciocínio interno, pedindo a mensagem de novo' : 'Resposta vazia, pedindo a mensagem de novo',
+      { requestId, telefone, finish_reason: resposta.choices[0].finish_reason,
+        tokens_out: resposta.usage?.completion_tokens, preview: textoFinal.slice(0, 120) });
+    const msgsRetry = [...messages];
+    if (textoFinal) msgsRetry.push({ role: 'assistant', content: textoFinal });
+    msgsRetry.push({ role: 'system', content: NUDGE_RESPOSTA });
     resposta = await comRetry(
-      () => chamarModelo(client, messages, MAX_TOKENS_AGENTE * 2),
+      () => chamarModelo(client, msgsRetry, MAX_TOKENS_AGENTE, 'agente-retry', 'none'),
       { tentativas: 2, requestId, etapa: 'openai/retry-vazio' }
     );
     textoFinal = resposta.choices[0].message?.content?.trim() || '';
   }
+  // Nunca deixa raciocínio sair: melhor vazio (quem chamou decide o que fazer)
+  // do que "We need respond..." no WhatsApp do cliente.
+  if (pareceRaciocinio(textoFinal)) textoFinal = '';
 
   logger.step(requestId, telefone, 'agente/ok', {
     iteracoes,
@@ -854,7 +930,7 @@ module.exports = {
   // Exposto só para o teste de regressão dos parâmetros do modelo — foi um
   // erro aqui que derrubou o atendimento em produção.
   _testes: {
-    chamarModelo, montarPayload,
+    chamarModelo, montarPayload, pareceRaciocinio,
     // `efeito` permite simular quem configurou OPENAI_EFFORT diferente do
     // padrão — é assim que se reproduz o erro de tools+effort de produção.
     resetar(modelo, efeito) {
