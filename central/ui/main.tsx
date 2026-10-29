@@ -33,6 +33,10 @@ type Conversation = {
   waiting_since?: string;
   created_at: string;
   cycle: number;
+  last_at?: string;
+  last_text?: string | null;
+  last_direction?: string | null;
+  last_kind?: string | null;
 };
 type Message = {
   id: string;
@@ -76,6 +80,41 @@ function hour(date: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+// Horário no estilo do WhatsApp: hora se for hoje, "ontem" ou a data.
+function when(date: string) {
+  const d = new Date(date),
+    today = new Date();
+  const days = Math.round(
+    (new Date(today.toDateString()).getTime() -
+      new Date(d.toDateString()).getTime()) /
+      86400000,
+  );
+  if (days <= 0) return hour(date);
+  if (days === 1) return "ontem";
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+}
+function displayName(c: Conversation) {
+  return /[\p{L}\d]/u.test(c.customer_name || "")
+    ? c.customer_name
+    : c.phone
+      ? "+" + c.phone
+      : "Cliente";
+}
+const kinds: Record<string, string> = {
+  image: "📷 Imagem",
+  audio: "🎤 Áudio",
+  document: "📎 Documento",
+  video: "🎬 Vídeo",
+  sticker: "Figurinha",
+};
+function preview(c: Conversation) {
+  const text =
+    c.last_text?.trim() ||
+    (c.last_kind && kinds[c.last_kind]) ||
+    c.reason_detail ||
+    stateNames[c.state];
+  return (c.last_direction === "out" ? "↩ " : "") + text;
 }
 function elapsed(date: string) {
   const m = Math.max(
@@ -837,7 +876,8 @@ function App() {
       </main>
     );
   const activeInstance = instances.find((i) => i.id === selected?.instance_id),
-    own = selected?.state === "human" && selected.assignee_id === me?.id;
+    own = selected?.state === "human" && selected.assignee_id === me?.id,
+    secondaryId = instances.find((i) => i.label.includes("secundário"))?.id;
   const responsible = team.find(
     (m) => m.user_id === selected?.assignee_id,
   )?.display_name;
@@ -871,6 +911,19 @@ function App() {
             </span>
           ))}
         </div>
+        <button
+          className="queue-badge"
+          onClick={() => {
+            if (tab !== "waiting_human") {
+              setTab("waiting_human");
+              setList([]);
+            }
+          }}
+          title="Ver quem precisa de ajuda"
+        >
+          <Icon name="clock" size={18} />
+          <strong>{pending}</strong> aguardando
+        </button>
         <div className="top-actions">
           <button
             className={sound ? "sound enabled" : "sound"}
@@ -894,6 +947,16 @@ function App() {
             <Icon name="sound" size={17} />
             {sound ? "Som ativado" : "Ativar som"}
           </button>
+          {me?.role === "admin" && (
+            <button
+              className="icon-button"
+              onClick={() => setSettings(!settings)}
+              title="Operação e instâncias"
+              aria-label="Operação e instâncias"
+            >
+              <Icon name="settings" />
+            </button>
+          )}
           <span className="divider" />
           <span className="avatar small">{initials(me?.name || "Equipe")}</span>
           <span className="user-name">
@@ -914,33 +977,6 @@ function App() {
           )}
         </div>
       </header>
-      <div className="workspace-heading">
-        <div>
-          <span className="eyebrow">CADA CLIENTE IMPORTA</span>
-          <h1>
-            Caixa de entrada{" "}
-            <span className="live">
-              <i className="dot" />
-              {connection}
-            </span>
-          </h1>
-        </div>
-        <div className="queue-badge">
-          <Icon name="clock" size={18} />
-          <strong>{pending}</strong>{" "}
-          {pending === 1 ? "conversa aguardando" : "conversas aguardando"}
-        </div>
-        {me?.role === "admin" && (
-          <button
-            className="icon-button"
-            onClick={() => setSettings(!settings)}
-            title="Operação e instâncias"
-            aria-label="Operação e instâncias"
-          >
-            <Icon name="settings" />
-          </button>
-        )}
-      </div>
       {(error || syncError) && (
         <div className="global-error" role="alert">
           {error || syncError}
@@ -1027,14 +1063,14 @@ function App() {
       )}
       <main className={"inbox " + (selected ? "has-selected" : "")}>
         <aside className="queue">
-          <div className="queue-title">
-            <h2>Conversas</h2>
-            <span className="muted">02 números</span>
-          </div>
           <div className="tabs">
             {[
               ["waiting_human", "Precisa de ajuda", "bell"],
-              ["mine", "Meus atendimentos", "user"],
+              [
+                "mine",
+                config.authMode === "open" ? "Em atendimento" : "Comigo",
+                "user",
+              ],
               ["ai", "Com a IA", "robot"],
               ["closed", "Encerradas", "check"],
             ].map(([id, label, icon]) => (
@@ -1062,36 +1098,19 @@ function App() {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </label>
-            <label className="number-select">
-              <span>WhatsApp</span>
-              <select
-                aria-label="Filtrar WhatsApp"
-                value={instance}
-                onChange={(e) => setInstance(e.target.value)}
-              >
-                <option value="">Todos os números</option>
-                {instances.map((i) => (
-                  <option value={i.id} key={i.id}>
-                    {i.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="list-title">
-            <span>
-              {tab === "waiting_human"
-                ? "MAIS ANTIGAS PRIMEIRO"
-                : tab === "mine"
-                  ? "COM VOCÊ"
-                  : tab === "ai"
-                    ? "EM ATENDIMENTO"
-                    : "HISTÓRICO"}
-            </span>
-            <span>
-              {list.length}
-              {hasMore ? "+" : ""}
-            </span>
+            <select
+              className="number-select"
+              aria-label="Filtrar WhatsApp"
+              value={instance}
+              onChange={(e) => setInstance(e.target.value)}
+            >
+              <option value="">Todos</option>
+              {instances.map((i) => (
+                <option value={i.id} key={i.id}>
+                  {i.label.replace("WhatsApp ", "")}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="conversation-list">
             {list.length === 0 && (
@@ -1113,40 +1132,31 @@ function App() {
               <button
                 key={c.id}
                 className={
-                  "conversation-card " +
+                  "conversation-row " +
                   (selected?.id === c.id ? "selected" : "")
                 }
                 onClick={() => choose(c)}
               >
-                <div className="card-top">
-                  <span
-                    className={
-                      "number-tag " +
-                      (c.instance_id ===
-                      instances.find((i) => i.label.includes("secundário"))?.id
-                        ? "secondary-number"
-                        : "")
-                    }
-                  >
-                    <Icon name="chat" size={12} />
-                    {c.label}
+                <span className="avatar">
+                  {initials(displayName(c).replace("+", "")) || "C"}
+                </span>
+                <span className="row-main">
+                  <span className="row-line">
+                    <strong>{displayName(c)}</strong>
+                    <time>{when(c.last_at || c.created_at)}</time>
                   </span>
-                  <time>{elapsed(c.waiting_since || c.created_at)}</time>
-                </div>
-                <div className="card-name">
-                  <span className="avatar">{initials(c.customer_name)}</span>
-                  <div>
-                    <strong>{c.customer_name}</strong>
-                    <span>
-                      {c.phone ? "+" + c.phone : "Identificador WhatsApp · LID"}
+                  <span className="row-line">
+                    <span className="row-preview">{preview(c)}</span>
+                    <span
+                      className={
+                        "number-chip " +
+                        (c.instance_id === secondaryId ? "secondary-number" : "")
+                      }
+                    >
+                      {c.label?.replace("WhatsApp ", "")}
                     </span>
-                  </div>
-                  <Icon name="arrow" size={14} />
-                </div>
-                <p>{c.reason_detail || stateNames[c.state]}</p>
-                {c.state === "waiting_human" && (
-                  <span className="waiting-marker">● Aguardando equipe</span>
-                )}
+                  </span>
+                </span>
               </button>
             ))}
             {hasMore && (
@@ -1179,335 +1189,246 @@ function App() {
           </footer>
         </aside>
         {selected ? (
-          <>
-            <section className="chat">
-              <header className="chat-heading">
-                <button
-                  className="back-button"
-                  onClick={() => {
-                    selectedId.current = null;
-                    setSelected(null);
-                  }}
-                >
-                  ← Voltar
-                </button>
-                <span className="avatar">
-                  {initials(selected.customer_name)}
-                </span>
-                <div>
-                  <h2>{selected.customer_name}</h2>
-                  <p>
-                    {selected.phone ? "+" + selected.phone : selected.chat_jid}
-                  </p>
-                </div>
-                <span className="number-tag">
-                  <Icon name="chat" size={13} />
-                  {activeInstance?.label}
-                </span>
-              </header>
-              <div className="chat-state">
-                <span className={"state-pill " + selected.state}>
-                  {stateNames[selected.state]}
-                </span>
-                <span>
-                  {responsible
-                    ? "Responsável: " + responsible
-                    : "Histórico separado por WhatsApp"}
-                </span>
-                <small>Ciclo {selected.cycle}</small>
-              </div>
-              <div className="compact-context">
-                <strong>
-                  {selected.reason_detail ||
-                    "Confira o histórico antes de responder."}
-                </strong>
-                {selected.summary && <p>{selected.summary}</p>}
-              </div>
-              <div className="messages" ref={scroll}>
-                {older && (
-                  <button
-                    className="load-more"
-                    onClick={() =>
-                      loadMessages(selected.id, messages[0]?.id).catch((e) =>
-                        setError(e.message),
-                      )
-                    }
-                  >
-                    Carregar mensagens anteriores
-                  </button>
-                )}
-                <div className="history-note">
-                  Esta conversa pertence ao{" "}
-                  {activeInstance?.label.toLowerCase()}.
-                </div>
-                {messages.map((m) => (
-                  <article
-                    key={m.id}
-                    className={
-                      "message " +
-                      (m.direction === "out" ? "outgoing" : "incoming")
-                    }
-                  >
-                    <div className="message-author">
-                      {m.direction === "in"
-                        ? selected.customer_name
-                        : m.author === "human"
-                          ? team.find((t) => t.user_id === m.author_id)
-                              ?.display_name || "Equipe humana"
-                          : m.author === "ai"
-                            ? "Chapinha · IA"
-                            : m.author === "external"
-                              ? "Resposta externa pelo WhatsApp"
-                              : "Sistema"}
-                    </div>
-                    <p>{m.text}</p>
-                    {m.kind !== "text" && (
-                      <Media message={m} token={token} onError={setError} />
-                    )}
-                    <footer>
-                      <time>{hour(m.provider_at || m.created_at)}</time>
-                      {m.direction === "out" && (
-                        <span className={"delivery " + m.status}>
-                          {statuses[m.status]}
-                        </span>
-                      )}
-                    </footer>
-                    {m.status === "unknown" && me?.role === "admin" && (
-                      <button
-                        className="link"
-                        onClick={() => {
-                          const note = window.prompt(
-                            "Descreva a conferência do envio no WhatsApp (mínimo 8 caracteres):",
-                          );
-                          if (note)
-                            command("resolve-message", {
-                              messageId: m.id,
-                              note,
-                            });
-                        }}
-                      >
-                        Registrar conferência
-                      </button>
-                    )}
-                  </article>
-                ))}
-              </div>
-              <div className="composer">
-                <div className="sending-from">
-                  <Icon name="chat" size={14} />
-                  Respondendo pelo <strong>{activeInstance?.label}</strong>
-                  {own && <span>· Atendimento com você</span>}
-                </div>
-                {own ? (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      command("messages", { text: drafts[selected.id] || "" });
-                    }}
-                  >
-                    <textarea
-                      aria-label="Sua resposta"
-                      placeholder="Escreva uma resposta para o cliente…"
-                      rows={3}
-                      maxLength={4000}
-                      value={drafts[selected.id] || ""}
-                      onChange={(e) =>
-                        setDrafts((old) => ({
-                          ...old,
-                          [selected.id]: e.target.value,
-                        }))
-                      }
-                    />
-                    <div className="composer-bottom">
-                      <small>O envio é feito pelo número de origem.</small>
-                      <button
-                        className="primary"
-                        disabled={!!busy || !(drafts[selected.id] || "").trim()}
-                      >
-                        Enviar <Icon name="send" size={16} />
-                      </button>
-                    </div>
-                  </form>
-                ) : (
-                  <div className="composer-locked">
-                    <Icon name="user" size={17} />
-                    {selected.state === "closed"
-                      ? "Encerrada. Uma nova mensagem do cliente inicia outro ciclo."
-                      : selected.state === "human"
-                        ? "Esta conversa está com " + responsible + "."
-                        : "Assuma o atendimento para responder ao cliente."}
-                  </div>
-                )}
-              </div>
-            </section>
-            <aside className="context">
-              <div className="context-title">
-                <Icon name="user" size={17} />
-                <h2>Sobre o atendimento</h2>
-              </div>
-              <div className="context-section">
-                <label>WHATSAPP DE ORIGEM</label>
-                <div className="origin-card">
-                  <span className="origin-icon">
-                    <Icon name="chat" />
-                  </span>
-                  <div>
-                    <strong>{activeInstance?.label}</strong>
-                    <span>
-                      <i
-                        className={
-                          activeInstance?.connection_state === "open"
-                            ? "dot"
-                            : "dot off"
-                        }
-                      />
-                      {activeInstance?.connection_state === "open"
-                        ? "Conectado"
-                        : "Desconectado"}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="context-section">
-                <label>MOTIVO DO ENCAMINHAMENTO</label>
+          <section className="chat">
+            <header className="chat-heading">
+              <button
+                className="back-button"
+                onClick={() => {
+                  selectedId.current = null;
+                  setSelected(null);
+                }}
+              >
+                ← Voltar
+              </button>
+              <span className="avatar">
+                {initials(displayName(selected).replace("+", "")) || "C"}
+              </span>
+              <div className="chat-who">
+                <h2>{displayName(selected)}</h2>
                 <p>
-                  {selected.reason_detail || "Sem encaminhamento registrado."}
+                  {selected.phone ? "+" + selected.phone : "Sem telefone"}
+                  {" · "}
+                  {activeInstance?.label.replace("WhatsApp ", "")}
+                  {" · "}
+                  <span className={"state-pill " + selected.state}>
+                    {selected.state === "human" && responsible
+                      ? "Com " + responsible
+                      : stateNames[selected.state]}
+                  </span>
                 </p>
               </div>
-              <div className="context-section">
-                <label>RESUMO PARA A EQUIPE</label>
-                <div className="summary">
-                  {selected.summary ||
-                    "Confira as mensagens do cliente antes de assumir."}
-                </div>
-              </div>
-              <div className="context-metrics">
-                <div>
-                  <Icon name="clock" size={17} />
-                  <span>
-                    Tempo de espera
-                    <strong>
-                      {selected.waiting_since
-                        ? elapsed(selected.waiting_since)
-                        : "—"}
-                    </strong>
-                  </span>
-                </div>
-                <div>
-                  <Icon name="user" size={17} />
-                  <span>
-                    Responsável
-                    <strong>{responsible || "Ainda não assumido"}</strong>
-                  </span>
-                </div>
-              </div>
-              <div className="context-actions">
+              <div className="chat-actions">
                 {["ai", "waiting_human"].includes(selected.state) && (
                   <button
                     className="primary"
                     disabled={!!busy}
                     onClick={() => command("claim")}
                   >
-                    <Icon name="user" size={17} />
-                    {busy === "claim"
-                      ? "Finalizando envio em andamento…"
-                      : "Assumir atendimento"}
+                    <Icon name="user" size={16} />
+                    {busy === "claim" ? "Aguarde…" : "Assumir"}
                   </button>
                 )}
                 {own && (
                   <>
                     <button
                       className="secondary"
-                      disabled={!!busy}
-                      onClick={() => command("release")}
+                      disabled={!!busy || !activeInstance?.ai_enabled}
+                      onClick={() => command("resume-ai")}
+                      title="A IA volta a responder na próxima mensagem do cliente"
                     >
-                      Devolver à fila
+                      <Icon name="robot" size={16} />
+                      Devolver à IA
                     </button>
                     <button
                       className="secondary"
-                      disabled={!!busy || !activeInstance?.ai_enabled}
-                      onClick={() => command("resume-ai")}
+                      disabled={!!busy}
+                      onClick={() => command("release")}
+                      title="Volta para a aba Precisa de ajuda"
                     >
-                      <Icon name="robot" size={17} />
-                      Devolver à IA
+                      Devolver à fila
                     </button>
                   </>
                 )}
                 {(own || me?.role === "admin") &&
                   selected.state !== "closed" && (
                     <button
-                      className="close-conversation"
+                      className="secondary"
                       disabled={!!busy}
                       onClick={() => command("close")}
                     >
-                      <Icon name="check" size={17} />
-                      Encerrar atendimento
+                      <Icon name="check" size={16} />
+                      Encerrar
                     </button>
                   )}
-                {selected.state === "human" && me?.role === "admin" && (
-                  <>
-                    <label className="transfer">
-                      Transferir para
-                      <select
-                        aria-label="Transferir responsável"
-                        value={transfer}
-                        onChange={(e) => setTransfer(e.target.value)}
-                      >
-                        <option value="">Selecione a pessoa</option>
-                        {team
-                          .filter((t) => t.user_id !== selected.assignee_id)
-                          .map((t) => (
-                            <option key={t.user_id} value={t.user_id}>
-                              {t.display_name}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    <button
-                      className="secondary"
-                      disabled={!!busy || !transfer}
-                      onClick={() => command("transfer", { userId: transfer })}
+                {selected.state === "human" &&
+                  me?.role === "admin" &&
+                  team.length > 1 && (
+                    <select
+                      className="transfer"
+                      aria-label="Transferir responsável"
+                      value=""
+                      disabled={!!busy}
+                      onChange={(e) =>
+                        e.target.value &&
+                        command("transfer", { userId: e.target.value })
+                      }
                     >
-                      Transferir atendimento
+                      <option value="">Transferir…</option>
+                      {team
+                        .filter((t) => t.user_id !== selected.assignee_id)
+                        .map((t) => (
+                          <option key={t.user_id} value={t.user_id}>
+                            {t.display_name}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+              </div>
+            </header>
+            {selected.state !== "closed" &&
+              (selected.reason_detail || selected.summary) && (
+                <div className="chat-reason">
+                  {selected.waiting_since && (
+                    <span className="chat-reason-time">
+                      <Icon name="clock" size={14} />
+                      {elapsed(selected.waiting_since)}
+                    </span>
+                  )}
+                  <span>
+                    <strong>{selected.reason_detail}</strong>
+                    {selected.summary &&
+                      selected.summary !== selected.reason_detail && (
+                        <> {selected.summary}</>
+                      )}
+                  </span>
+                </div>
+              )}
+            <div className="messages" ref={scroll}>
+              {older && (
+                <button
+                  className="load-more"
+                  onClick={() =>
+                    loadMessages(selected.id, messages[0]?.id).catch((e) =>
+                      setError(e.message),
+                    )
+                  }
+                >
+                  Carregar mensagens anteriores
+                </button>
+              )}
+              {messages.map((m) => (
+                <article
+                  key={m.id}
+                  className={
+                    "message " +
+                    (m.direction === "out" ? "outgoing" : "incoming") +
+                    (m.author === "ai" ? " from-ai" : "")
+                  }
+                >
+                  {m.direction === "out" && (
+                    <div className="message-author">
+                      {m.author === "human"
+                        ? team.find((t) => t.user_id === m.author_id)
+                            ?.display_name || "Equipe"
+                        : m.author === "ai"
+                          ? "IA"
+                          : m.author === "external"
+                            ? "Equipe · pelo celular"
+                            : "Sistema"}
+                    </div>
+                  )}
+                  <p>{m.text}</p>
+                  {m.kind !== "text" && (
+                    <Media message={m} token={token} onError={setError} />
+                  )}
+                  <footer>
+                    <time>{hour(m.provider_at || m.created_at)}</time>
+                    {m.direction === "out" && (
+                      <span className={"delivery " + m.status}>
+                        {statuses[m.status]}
+                      </span>
+                    )}
+                  </footer>
+                  {m.status === "unknown" && me?.role === "admin" && (
+                    <button
+                      className="link"
+                      onClick={() => {
+                        const note = window.prompt(
+                          "Descreva a conferência do envio no WhatsApp (mínimo 8 caracteres):",
+                        );
+                        if (note)
+                          command("resolve-message", {
+                            messageId: m.id,
+                            note,
+                          });
+                      }}
+                    >
+                      Registrar conferência
                     </button>
-                  </>
-                )}
-              </div>
-              <div className="human-note">
-                <Icon name="robot" size={16} />
-                <p>
-                  {selected.state === "human"
-                    ? "A IA permanece pausada até uma ação explícita da equipe."
-                    : selected.state === "closed"
-                      ? "A próxima mensagem do cliente poderá iniciar um novo ciclo."
-                      : "O atendimento fica sempre no WhatsApp de origem."}
-                </p>
-              </div>
-            </aside>
-          </>
+                  )}
+                </article>
+              ))}
+            </div>
+            <div className="composer">
+              {own ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    command("messages", { text: drafts[selected.id] || "" });
+                  }}
+                >
+                  <textarea
+                    aria-label="Sua resposta"
+                    placeholder={
+                      "Responder pelo " +
+                      (activeInstance?.label || "WhatsApp") +
+                      "… (Enter envia, Shift+Enter quebra linha)"
+                    }
+                    rows={2}
+                    maxLength={4000}
+                    value={drafts[selected.id] || ""}
+                    onChange={(e) =>
+                      setDrafts((old) => ({
+                        ...old,
+                        [selected.id]: e.target.value,
+                      }))
+                    }
+                    onKeyDown={(e) => {
+                      if (
+                        e.key === "Enter" &&
+                        !e.shiftKey &&
+                        !e.nativeEvent.isComposing
+                      ) {
+                        e.preventDefault();
+                        if (!busy && (drafts[selected.id] || "").trim())
+                          e.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                  />
+                  <button
+                    className="primary"
+                    aria-label="Enviar"
+                    disabled={!!busy || !(drafts[selected.id] || "").trim()}
+                  >
+                    <Icon name="send" size={18} />
+                  </button>
+                </form>
+              ) : (
+                <div className="composer-locked">
+                  <Icon name="user" size={17} />
+                  {selected.state === "closed"
+                    ? "Conversa encerrada. Se o cliente escrever de novo, ela volta para a lista."
+                    : selected.state === "human"
+                      ? "Esta conversa está com " + (responsible || "outra pessoa") + "."
+                      : "Clique em Assumir para responder. A IA para de responder este cliente."}
+                </div>
+              )}
+            </div>
+          </section>
         ) : (
           <section className="empty-chat">
-            <div className="empty-illustration">
-              <Icon name="chat" size={44} />
-              <span>✓</span>
-            </div>
-            <span className="eyebrow">BOM ATENDIMENTO, EM EQUIPE</span>
-            <h2>Cada conversa tem seu lugar.</h2>
-            <p>
-              Selecione uma conversa para ver o histórico,
-              <br />
-              entender o contexto e ajudar o cliente.
-            </p>
-            <div className="empty-points">
-              <span>
-                <i className="dot" />
-                Dois números, uma equipe
-              </span>
-              <span>
-                <Icon name="user" size={14} />
-                Controle humano persistente
-              </span>
-            </div>
+            <Icon name="chat" size={36} />
+            <p>Selecione uma conversa para ver as mensagens.</p>
           </section>
         )}
       </main>

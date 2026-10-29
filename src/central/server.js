@@ -230,19 +230,27 @@ function createApp({
           args.length +
           ")";
       }
+      // Mais recentes no topo: ordena pela última mensagem da conversa.
+      const lastAt = "coalesce(lm.provider_at,lm.created_at,c.created_at)";
       if (req.query.after) {
         assert(uuid(req.query.after), 400, "Cursor inválido.");
         args.push(req.query.after);
         const n = args.length;
         extra +=
-          " and (coalesce(h.created_at,c.created_at),c.id) > (select coalesce(hh.created_at,cc.created_at),cc.id from cw_conversations cc left join cw_handoffs hh on hh.conversation_id=cc.id and hh.status in ('pending','claimed') where cc.id=$" +
+          " and (" +
+          lastAt +
+          ",c.id) < (select coalesce(max(coalesce(m.provider_at,m.created_at)),cc.created_at),cc.id from cw_conversations cc left join cw_messages m on m.conversation_id=cc.id where cc.id=$" +
           n +
-          " and cc.restaurant_id=$1)";
+          " and cc.restaurant_id=$1 group by cc.id)";
       }
       const result = await pool.query(
-        "select c.*,i.label,h.reason_code,h.reason_detail,h.summary,h.created_at as waiting_since from cw_conversations c join cw_instances i on i.id=c.instance_id left join cw_handoffs h on h.conversation_id=c.id and h.status in ('pending','claimed') where c.restaurant_id=$1 and c.state=$2" +
+        "select c.*,i.label,h.reason_code,h.reason_detail,h.summary,h.created_at as waiting_since," +
+          lastAt +
+          " as last_at,lm.text as last_text,lm.direction as last_direction,lm.kind as last_kind from cw_conversations c join cw_instances i on i.id=c.instance_id left join cw_handoffs h on h.conversation_id=c.id and h.status in ('pending','claimed') left join lateral (select provider_at,created_at,text,direction,kind from cw_messages where conversation_id=c.id order by coalesce(provider_at,created_at) desc,created_at desc,id desc limit 1) lm on true where c.restaurant_id=$1 and c.state=$2" +
           extra +
-          " order by coalesce(h.created_at,c.created_at),c.id limit 51",
+          " order by " +
+          lastAt +
+          " desc,c.id desc limit 51",
         args,
       );
       res.json({

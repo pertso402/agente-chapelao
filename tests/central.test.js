@@ -1077,3 +1077,40 @@ test("tomada humana continua descartando a resposta pendente da IA", async (t) =
   if (send) await s.engine.dispatch(send);
   assert.equal(s.sends.length, 0);
 });
+
+test("lista de conversas mostra as mais recentes no topo, com prévia da última mensagem", async (t) => {
+  const s = await setup();
+  t.after(() => s.pool.end());
+  const { app } = createApp({
+    ...s,
+    authenticate: async () => ({ id: USERS.admin }),
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const base = "http://127.0.0.1:" + server.address().port;
+  const say = (n, id, text, at) => {
+    const data = payload(id, text, false, "55440000000" + n + "@s.whatsapp.net").data;
+    data.messageTimestamp = 1792040000 + at;
+    return s.engine.ingest(IDS.secondary, { event: "MESSAGES_UPSERT", data });
+  };
+  await say(1, "a", "primeira", 10);
+  await say(2, "b", "segunda", 20);
+  await say(3, "c", "terceira", 30);
+  const list = async (after = "") =>
+    (
+      await (
+        await fetch(
+          base + "/api/conversations?state=waiting_human" + (after ? "&after=" + after : ""),
+          { headers: { Authorization: "Bearer x" } },
+        )
+      ).json()
+    ).items;
+  let items = await list();
+  assert.deepEqual(items.map((c) => c.last_text), ["terceira", "segunda", "primeira"]);
+  assert.deepEqual((await list(items[0].id)).map((c) => c.last_text), ["segunda", "primeira"]);
+  await say(1, "d", "voltei", 40);
+  items = await list();
+  assert.deepEqual(items.map((c) => c.last_text), ["voltei", "terceira", "segunda"]);
+  assert.equal(items[0].last_direction, "in");
+});
