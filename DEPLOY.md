@@ -1,3 +1,7 @@
+# Central unificada — implantação nova
+
+A implementação da central de dois números está em [CENTRAL.md](CENTRAL.md). O agente legado continua como padrão até configurar `CENTRAL_ENABLED=true`. Os passos abaixo descrevem somente o agente legado.
+
 # Deploy — Agente Chapelão v3.1
 
 O sistema tem **duas partes**:

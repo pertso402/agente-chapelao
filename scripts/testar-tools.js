@@ -56,6 +56,7 @@ require.cache[caminhoDb] = {
     criarAlertaAtendimento: async () => {},
     pausarAtendimento: async () => {},
     atualizarStatusPedido: async () => ({ numero_pedido: 1 }),
+    nomeConhecido: async (_tel, pushName) => pushName || null,
     precificarPedido: async () => ({
       itens: [], brindes: [], combo: null,
       subtotal: 21, taxaEntrega: 0, desconto: 0, total: 21,
@@ -68,6 +69,7 @@ require.cache[caminhoDb] = {
 };
 
 const { TOOLS, executarTool } = require('../src/tools');
+const db = require.cache[caminhoDb].exports;
 
 let passou = 0;
 async function teste(nome, fn) {
@@ -101,6 +103,36 @@ async function teste(nome, fn) {
     }, { telefone: '5544999' });
     assert.ok(!/is not defined/i.test(r), `estourou: ${r}`);
     assert.ok(r.includes('salvo') || r.includes('itens'), `retorno inesperado: ${r.slice(0, 120)}`);
+  });
+
+  await teste('nome entra sozinho com o carrinho — o agente não pergunta "nome completo"', async () => {
+    delete rascunho.nome_cliente;
+    await executarTool('salvar_dados_pedido', {
+      itens: [{ nome: 'Marmitex Média', quantidade: 1 }],
+    }, { telefone: '5544999', pushName: 'Meyreh' });
+    assert.strictEqual(rascunho.nome_cliente, 'Meyreh');
+  });
+
+  await teste('nome dito pelo cliente vale mais que o do WhatsApp', async () => {
+    delete rascunho.nome_cliente;
+    await executarTool('salvar_dados_pedido', { nome_cliente: 'Jaqueline Palhares' }, { telefone: '5544999', pushName: 'Jaque' });
+    assert.strictEqual(rascunho.nome_cliente, 'Jaqueline Palhares');
+  });
+
+  await teste('regravar o que já estava no pedido não reenvia o resumo (confirmação repetida)', async () => {
+    const original = db.atualizarRascunho;
+    Object.assign(rascunho, { etapa_atual: 'aguardando_confirmacao', forma_pagamento: 'pix', tipo_entrega: 'retirada', nome_cliente: 'Lorena' });
+    db.atualizarRascunho = async () => ({ rascunho, avaliacao: { completo: true, faltando: [], etapa: 'aguardando_confirmacao' }, naoEncontrados: [], avisos: [] });
+    try {
+      const igual = JSON.parse(await executarTool('salvar_dados_pedido', { forma_pagamento: 'pix' }, { telefone: '5544999' }));
+      assert.strictEqual(igual.status, 'PRONTO_E_RESUMO_JA_ENVIADO');
+      assert.ok(!igual.RESUMO_FINAL_TEXTO_EXATO, 'mandou o resumo de novo');
+      const pedido = JSON.parse(await executarTool('salvar_dados_pedido', {}, { telefone: '5544999' }));
+      assert.ok(pedido.RESUMO_FINAL_TEXTO_EXATO, 'chamada vazia é como o agente busca o resumo — tem que vir');
+    } finally {
+      db.atualizarRascunho = original;
+      Object.assign(rascunho, { etapa_atual: 'inicio' });
+    }
   });
 
   await teste('tipo de entrega em português é aceito e normalizado', async () => {

@@ -106,7 +106,7 @@ const DEFINICOES = [
   },
   {
     name: 'chamar_atendente',
-    description: 'ÚLTIMO RECURSO. Chama um atendente humano E PAUSA seu atendimento por 10 minutos — a conversa para de verdade, então cada chamada sem necessidade é um cliente esperando à toa e uma venda que esfria. Use SOMENTE em: (1) reclamação sobre comida ou entrega que já saiu; (2) alterar ou cancelar pedido JÁ CONFIRMADO; (3) cobrança, valor pago errado, reembolso, nota fiscal; (4) cliente irritado ou pedindo o dono; (5) pergunta sobre pedido de outro dia; (6) Convênio Chapelão — cliente quer saber do convênio com empresas ou levar o Chapelão pra empresa onde trabalha (motivo começando por "🤝 [CONVÊNIO]"). ⛔ NÃO chame para: nome de item que não bate com o cardápio (confirme com o cliente), falta de informação do pedido (pergunte), agendamento (recuse com educação), prazo (você já sabe), endereço incompleto (peça rua e número), mudar item antes de confirmar (é só salvar_dados_pedido de novo), assunto fora do cardápio (encaminhe para o contato de outros assuntos). Nesses casos você tem uma saída melhor que chamar humano: PERGUNTAR ao cliente.',
+    description: 'ÚLTIMO RECURSO. Chama um atendente humano E PAUSA seu atendimento por 10 minutos — a conversa para de verdade, então cada chamada sem necessidade é um cliente esperando à toa e uma venda que esfria. Use SOMENTE em: (1) reclamação sobre comida ou entrega que já saiu; (2) alterar ou cancelar pedido JÁ CONFIRMADO; (3) cobrança, valor pago errado, reembolso, nota fiscal; (4) cliente irritado ou pedindo o dono; (5) pergunta sobre pedido de outro dia; (6) Convênio Chapelão — cliente quer saber do convênio com empresas ou levar o Chapelão pra empresa onde trabalha (motivo começando por "🤝 [CONVÊNIO]"). ⛔ NÃO chame para: nome de item que não bate com o cardápio (confirme com o cliente), falta de informação do pedido (pergunte), agendamento ou pedido pra outro dia (recuse com educação), prazo (você já sabe), endereço incompleto (peça rua e número), mudar item antes de confirmar (é só salvar_dados_pedido de novo), assunto fora do cardápio, reserva de espaço, aniversário ou evento (encaminhe para o contato de outros assuntos), "já saiu meu pedido?" / "deu certo?" sobre pedido de HOJE (responda com PEDIDOS DE HOJE do contexto), prêmio/brinde pra um pedido que já foi feito ou pelo iFood (explique que vale no próximo pedido pelo WhatsApp), cliente esperando o valor da entrega (diga que está confirmando — o sistema avisa sozinho). Nesses casos você tem uma saída melhor que chamar humano: PERGUNTAR ao cliente.',
     parameters: {
       type: 'object',
       properties: {
@@ -262,7 +262,8 @@ async function executarTool(nome, args, contexto = {}) {
         combosParaOAgente +
         ' O cliente fala como gente, não como cardápio: "porco" é a carne suína do dia (paleta, pernil, lombo, costelinha), "boi"/"carne" é a bovina (bife, costela, almôndega, patinho), "frango" é a de ave (coxa, sobrecoxa, filé). Faça essa tradução VOCÊ, em silêncio, e confirme de forma natural — "boa, hoje o porco é paleta suína assada ✅".' +
         ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.' +
-        ' SALADA TEM TODO DIA, mesmo que não apareça na lista acima. Se o cliente perguntar ou pedir salada, confirme que sim e inclua nos acompanhamentos dele. Nunca diga que não tem, nunca chame atendente por causa de salada.]';
+        ' SALADA TEM TODO DIA, mesmo que não apareça na lista acima. Se o cliente perguntar ou pedir salada, confirme que sim e inclua nos acompanhamentos dele. Nunca diga que não tem, nunca chame atendente por causa de salada.' +
+        ' EXCEÇÃO À REGRA DE REPASSAR: se o cliente fez uma pergunta específica ("tem dobradinha hoje?", "tem feijoada?", "qual o peixe?"), RESPONDA a pergunta em uma frase usando esta lista ("tem sim, a dobradinha tá no cardápio de hoje 😋") e emende a escolha do tamanho — não cole o cardápio inteiro por cima da pergunta dele. Se ele já mandou o pedido montado (carnes, acompanhamentos, tamanho), NÃO reenvie o cardápio: salve com salvar_dados_pedido.]';
     }
 
     case 'info_restaurante': {
@@ -322,6 +323,21 @@ async function executarTool(nome, args, contexto = {}) {
       // troco 0 é resposta válida ("tenho o valor certo") — por isso o teste é
       // contra null/undefined, não contra "valor falsy".
       if (args.troco_para != null) campos.troco_para = Math.max(0, Number(args.troco_para) || 0);
+
+      // Nome sem perguntar: o do último pedido, ou o do WhatsApp quando parece
+      // nome de gente. Só pede se nenhum dos dois servir (avaliarRascunho
+      // continua exigindo nome — a comanda precisa de um).
+      // Estado de antes desta chamada: decide o nome automático e se algo
+      // mudou de verdade (ver "nada mudou" mais abaixo).
+      const antes = await db.carregarRascunho(telefone).catch(() => null);
+      if (!campos.nome_cliente) {
+        const atual = antes;
+        if (!atual?.nome_cliente && (campos.itens || parseItens(atual?.itens).length)) {
+          let nome = null;
+          try { nome = await db.nomeConhecido(telefone, contexto.pushName); } catch { /* segue sem nome: o agente pergunta */ }
+          if (nome) campos.nome_cliente = nome;
+        }
+      }
 
       // Combo vem pelo nome que o cliente viu no cardápio; o que é gravado é o
       // id. Nome desconhecido não vira combo silenciosamente — o agente é
@@ -440,6 +456,22 @@ async function executarTool(nome, args, contexto = {}) {
         // resumo sair mais caro, sem ninguém entender por quê.
         if (comboAtivo && !p.combo) {
           resumo.ATENCAO_combo_nao_aplicado = `Os itens do pedido não batem com a composição do ${comboAtivo.nome}, então o preço saiu avulso. Confira com o cliente o que ele quer: monte a composição exata do combo, ou siga avulso e NÃO cite mais o preço do combo.`;
+        }
+
+        // Regravar o que já estava no pedido ("Pix" com o pagamento já em PIX)
+        // devolvia o resumo com ordem de copiar — e o cliente recebia o pedido
+        // de confirmação duas vezes. Pedido já pronto + nada mudou = o resumo
+        // já está na conversa; o agente só lembra do SIM.
+        const CAMPOS_DO_PEDIDO = ['itens', 'itens_brinde', 'tipo_entrega', 'endereco', 'forma_pagamento', 'troco_para', 'combo_id', 'observacao'];
+        const normal = (v) => (typeof v === 'string' ? v : JSON.stringify(v ?? null));
+        const nadaMudou = Object.keys(campos).length > 0 &&
+          antes?.etapa_atual === 'aguardando_confirmacao' &&
+          CAMPOS_DO_PEDIDO.every(k => normal(antes?.[k]) === normal(rascunho[k]));
+        if (nadaMudou) {
+          resumo.status = 'PRONTO_E_RESUMO_JA_ENVIADO';
+          resumo.total = fmtBRL(p.total);
+          resumo.instrucao_final = 'Nada mudou no pedido e o resumo com o total JÁ foi enviado ao cliente. NÃO reenvie o resumo. Responda em UMA frase curta (respondendo o que ele disse, se for o caso) e termine com "é só me mandar um *SIM* que eu já mando pra cozinha 😊".';
+          return JSON.stringify(resumo);
         }
 
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';

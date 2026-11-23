@@ -2,3 +2,11 @@ node_modules/
 .env
 print-agent/.env
 *.log
+
+.env.*
+!.env.example
+!.env.central.example
+central/public/
+playwright-report/
+test-results/
+supabase/.temp/

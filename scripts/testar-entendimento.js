@@ -63,6 +63,12 @@ teste('ESTE É O OUTRO CASO REAL: "sim[" (tecla errada) confirma', () => {
   assert.ok(ehConfirmacao('sim['), 'a pontuação solta derrubou a confirmação');
 });
 
+teste('ESTE É O CASO DO PEDRO (26/10): "Sm" e os "pode"/"fechado" do dia a dia confirmam', () => {
+  for (const t of ['Sm', 'sm', 'Simmm', 'ssim', 'Pode', 'pode sim', 'Fechado', 'claro', 'pode mandar', 'Isso aí', 'aham']) {
+    assert.ok(ehConfirmacao(t), t);
+  }
+});
+
 teste('pontuação sobrando não atrapalha', () => {
   for (const t of ['sim!!', 'SIM.', '.sim', 'ok!', 'blz...', 'isso!']) {
     assert.ok(ehConfirmacao(t), t);

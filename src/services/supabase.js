@@ -5,6 +5,7 @@ const ws = require('ws');
 const { normalizar, parseItens, avaliarRascunho, calcularSubtotal, calcularTotais } = require('../utils/pedido');
 const { hojeLocal, money } = require('../config');
 const logger = require('../logger');
+const legacyContext = require('../central/legacy-context');
 
 const sb = createClient(
   process.env.SUPA_URL,
@@ -21,6 +22,8 @@ const sb = createClient(
 // itens de ontem pra quem já tinha recebido a marmita. Por isso: busca DESC
 // (as mais recentes) e só depois inverte pra ordem cronológica.
 async function carregarHistorico(telefone, limite = 16) {
+  const scope = legacyContext.current();
+  if (scope) return scope.history.slice(-limite);
   const { data, error } = await sb
     .from('n8n_chat_histories')
     .select('message, created_at')
@@ -40,10 +43,15 @@ async function carregarHistorico(telefone, limite = 16) {
     .filter(m => m && m.role && m.content);
 }
 
-async function salvarMensagem(telefone, role, content) {
+async function salvarMensagem(telefone, role, content, metadata = {}) {
+  const scope = legacyContext.current();
+  if (scope) {
+    await scope.recordHistory(role, content);
+    if (role === 'assistant') return; // The dispatcher records assistant text only after provider acceptance.
+  }
   const { error } = await sb.from('n8n_chat_histories').insert({
     session_id: telefone,
-    message: JSON.stringify({ role, content, ts: Date.now() }),
+    message: JSON.stringify({ role, content, ts: Date.now(), central_message_id: metadata.centralMessageId || scope?.currentMessageId || undefined }),
   });
   if (error) throw new Error(`Supabase/salvarMensagem: ${error.message}`);
 }
@@ -141,6 +149,11 @@ async function atualizarRascunho(telefone, campos) {
   // Código decide a etapa — a LLM nunca seta isso
   merge.etapa_atual = avaliacao.etapa;
 
+  // Quando o carrinho mudou pela última vez. É o que permite saber se um
+  // pedido gravado depois (pela equipe no painel) já atendeu este carrinho —
+  // ver carrinhoJaVirouPedido.
+  if (campos.itens !== undefined) merge.itens_atualizados_em = new Date().toISOString();
+
   await salvarRascunho(telefone, merge);
 
   const rascunho = await carregarRascunho(telefone);
@@ -233,6 +246,12 @@ async function reivindicarTravados(travadoMs) {
 // ─── PAUSA DE ATENDIMENTO (atendente humano assumiu) ─────────────────────────
 
 async function verificarPausa(telefone) {
+  const scope = legacyContext.current();
+  if (scope) return Boolean(scope.handoffReason);
+  if (process.env.CENTRAL_FULL_AGENT === 'true') {
+    const paused = await require('../central/full-agent').backgroundPaused(telefone);
+    if (paused !== null) return paused;
+  }
   const tel = String(telefone).replace(/\D/g, '');
   const { data } = await sb
     .from('agente_pausas')
@@ -244,6 +263,11 @@ async function verificarPausa(telefone) {
 }
 
 async function pausarAtendimento(telefone, ms, motivo) {
+  const scope = legacyContext.current();
+  if (scope) { scope.requestHandoff(motivo); return; }
+  if (process.env.CENTRAL_FULL_AGENT === 'true') {
+    await require('../central/full-agent').backgroundHandoff(telefone, motivo);
+  }
   const tel = String(telefone).replace(/\D/g, '');
   const pausadoAte = new Date(Date.now() + ms).toISOString();
   const { error } = await sb
@@ -265,6 +289,10 @@ async function retomarAtendimento(telefone) {
 // reclama de algo que ela não resolve sozinha. Aparece no painel (com som)
 // pro atendente assumir a conversa.
 
+// Alerta sozinho NÃO tira a conversa da IA, como no agente original: o pedido
+// de taxa abre alerta e o agente precisa continuar livre pra entregar o valor
+// quando alguém digitar no painel. Quem tira da IA é pausarAtendimento, que o
+// chamar_atendente sempre chama junto.
 async function criarAlertaAtendimento(telefone, nomeCliente, motivo) {
   const tel = String(telefone).replace(/\D/g, '');
   const { error } = await sb
@@ -427,7 +455,12 @@ async function validarItens(itensInput) {
       const partes = [];
       if (carnesFinal.length) partes.push(`Carnes: ${carnesFinal.join(', ')}`);
       if (acompFinal.length) partes.push(`Acompanhamentos: ${acompFinal.join(', ')}`);
-      if (partes.length) itemValidado.observacao = partes.join(' | ');
+      // A montagem vai junto com o pedido do cliente pra esse item, não no
+      // lugar dele: "costela bem magra, sem gordura" (Gustavo, 24/10) e "bife
+      // bem torradinho" (Guilherme, 20/10) sumiam aqui e a cozinha nunca via.
+      if (partes.length) {
+        itemValidado.observacao = [partes.join(' | '), itemValidado.observacao].filter(Boolean).join(' | ');
+      }
     }
 
     itens.push(itemValidado);
@@ -1061,6 +1094,42 @@ async function buscarPedidoPendente(telefone) {
   return pedidos[0];
 }
 
+// Pedidos de HOJE do cliente, do mais novo pro mais antigo. Alimentam o
+// pós-venda ("já saiu?", "deu certo?") — sem isso o agente não sabia que o
+// pedido existia e ou chamava atendente, ou reenviava o resumo do carrinho.
+async function pedidosDeHoje(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { data: cli } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
+  if (!cli?.id) return [];
+  const { data, error } = await sb
+    .from('pedidos')
+    .select('numero_pedido, status, tipo_entrega, total, created_at')
+    .eq('cliente_id', cli.id)
+    .gte('created_at', `${hojeLocal()}T00:00:00-03:00`)
+    .neq('status', 'cancelado')
+    .order('created_at', { ascending: false })
+    .limit(5);
+  if (error) throw new Error(`Supabase/pedidosDeHoje: ${error.message}`);
+  return data || [];
+}
+
+// Nome pra comanda sem perguntar: o do último pedido, ou o do WhatsApp quando
+// ele parece um nome de gente. "Me passa seu nome completo?" era a pergunta a
+// mais em quase todo pedido, e às vezes repetida ("confirma seu nome completo").
+const NOMES_INVALIDOS = new Set(['cliente', 'voce', 'você', 'eu']);
+function nomeUtil(nome) {
+  const limpo = String(nome || '').replace(/[^\p{L}\p{M}\s'.-]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (limpo.replace(/[^\p{L}]/gu, '').length < 2) return null;
+  if (NOMES_INVALIDOS.has(limpo.toLowerCase())) return null;
+  return limpo.slice(0, 60);
+}
+async function nomeConhecido(telefone, pushName) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const { data: cli } = await sb.from('clientes').select('nome, total_pedidos').eq('telefone', tel).maybeSingle();
+  if (cli?.total_pedidos > 0 && nomeUtil(cli.nome)) return nomeUtil(cli.nome);
+  return nomeUtil(pushName);
+}
+
 async function atualizarStatusPedido(telefone, novoStatus) {
   const pedido = await buscarPedidoPendente(telefone);
 
@@ -1082,6 +1151,7 @@ module.exports = {
   buscarLojaAberta, definirLojaAberta, lerMarcador, gravarMarcador,
   garantirCliente, garantirBrindeDeAnuncio, marcarInteresse, buscarOuCriarCliente, criarPedidoCompleto,
   atualizarStatusPedido, buscarPedidoPendente,
+  pedidosDeHoje, nomeConhecido, nomeUtil,
   buscarCupomAtivoPorTelefone, darBaixaCupom,
   verificarPausa, pausarAtendimento, retomarAtendimento, reivindicarFollowups, reivindicarTravados,
   criarAlertaAtendimento,
