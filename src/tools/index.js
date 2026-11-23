@@ -212,27 +212,33 @@ async function executarTool(nome, args, contexto = {}) {
           + '\n_(entrega à parte — 100% do valor vai pro entregador)_'
         : '';
 
-      // REGRA 1: combo é cardápio, não oferta extra — sai no MESMO bloco. Mandar
-      // o cardápio primeiro e o combo depois transforma o combo em "empurrão de
-      // venda", que é justamente o que faz o cliente travar na avulsa.
-      const emoji = { almoco_resolvido: '🍱', almoco_de_dois: '🍱🍱', mesa_cheia: '🍱🍱🍱' };
-      // ⚠️ O texto do combo NÃO pode dizer "entrega por nossa conta" seco: o
-      // combo cobre até um TETO (R$ 6 no Almoço Resolvido), e a entrega daqui
-      // passa disso com facilidade. Prometer entrega grátis e depois cobrar a
-      // diferença é a pior coisa que este sistema pode fazer — o cliente lê
-      // "grátis" no cardápio e descobre o contrário no resumo.
-      const linhasCombo = combos.length
-        ? '\n\n🔥 *Combos — a gente ajuda na entrega:*\n' + combos.map(c => {
-            // Rótulo de cliente, nunca o nome interno do produto: "Grande + sobremesa
-            // + Coca mini" e não "Marmitex Grande + Sobremesa 75ml + Refrigerante 200ml Pet".
-            const desc = c.itens
-              .map(i => `${i.quantidade > 1 ? `${i.quantidade} ` : ''}${i.rotulo}`)
-              .join(' + ');
-            const ajuda = Number(c.subsidio_frete_max) > 0
-              ? ` _(+ até ${fmtBRL(c.subsidio_frete_max)} da entrega por nossa conta)_`
-              : '';
-            return `${emoji[c.slug] || '🍱'} *${c.nome}* — ${desc} — ${fmtBRL(c.preco)}${ajuda}`;
-          }).join('\n')
+      // Os combos SAÍRAM do cardápio que vai pro cliente: eram enviados em toda
+      // apresentação e praticamente ninguém pedia — virou bloco que a pessoa
+      // pula, alongando a mensagem no momento em que ela só quer decidir o
+      // almoço.
+      //
+      // Mas continuam existindo e vendáveis. A composição e o preço seguem indo
+      // pro agente aqui embaixo, na instrução interna, porque ele ainda precisa
+      // citar o combo certo quando o cliente PERGUNTA ou quando pedir 2+
+      // marmitas (REGRA 3) — e o prompt proíbe citar preço de memória. Sem esses
+      // dados, a alternativa do agente seria inventar valor, que é o pior erro
+      // que este sistema pode cometer.
+      //
+      // ⚠️ Em qualquer menção, o subsídio é um TETO (R$ 6 no Almoço Resolvido),
+      // não entrega grátis: a entrega daqui passa disso com facilidade, e
+      // prometer grátis pra cobrar a diferença no resumo é o pior desfecho.
+      const combosParaOAgente = combos.length
+        ? ' COMBOS DISPONÍVEIS (não envie isto no cardápio — use só se o cliente perguntar ou no caso da REGRA 3): '
+          + combos.map(c => {
+              const desc = c.itens
+                .map(i => `${i.quantidade > 1 ? `${i.quantidade} ` : ''}${i.rotulo}`)
+                .join(' + ');
+              const teto = Number(c.subsidio_frete_max) > 0
+                ? `, a casa cobre até ${fmtBRL(c.subsidio_frete_max)} da entrega`
+                : '';
+              return `${c.nome}: ${desc}, ${fmtBRL(c.preco)}${teto}`;
+            }).join(' | ')
+          + '.'
         : '';
 
       if (!itens) {
@@ -249,11 +255,11 @@ async function executarTool(nome, args, contexto = {}) {
       if (itens.carne.length) txt += `🥩 *Carnes* (escolha até 2):\n${itens.carne.join(' · ')}\n\n`;
       if (acompanhamentos.length) txt += `🍚 *Acompanhamentos* (escolha até 6):\n${acompanhamentos.join(' · ')}\n`;
       txt += linhasPreco;
-      txt += linhasCombo;
 
       return txt.trim() +
-        '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com a pergunta "É pra uma pessoa ou pra mais de uma?" — NUNCA "Média ou Grande?", que trava o cliente na avulsa antes dele ler os combos. Não liste o resto da loja.' +
-        ' Esta apresentação do cardápio JÁ CONTA como a oferta de combo da conversa (REGRA 2): não ofereça combo de novo depois disso, exceto no caso da REGRA 3.' +
+        '\n\n[INSTRUÇÃO INTERNA — não repita nada desta linha pro cliente: repasse a mensagem acima como ela está e termine com a pergunta "É pra uma pessoa ou pra mais de uma?". Não liste o resto da loja.' +
+        ' NÃO mencione combo aqui: o cardápio não traz mais combo, e oferecer agora é o empurrão de venda que a casa tirou de propósito. Combo só entra se o cliente perguntar ou no caso da REGRA 3 (2+ marmitas, ou 1 Grande).' +
+        combosParaOAgente +
         ' O cliente fala como gente, não como cardápio: "porco" é a carne suína do dia (paleta, pernil, lombo, costelinha), "boi"/"carne" é a bovina (bife, costela, almôndega, patinho), "frango" é a de ave (coxa, sobrecoxa, filé). Faça essa tradução VOCÊ, em silêncio, e confirme de forma natural — "boa, hoje o porco é paleta suína assada ✅".' +
         ' Só pergunte se houver DUAS ou mais opções do mesmo tipo na lista de hoje; nesse caso pergunte qual das duas. Nunca chame atendente por causa disso, e nunca responda que não temos uma carne que está na lista acima com outro nome.' +
         ' SALADA TEM TODO DIA, mesmo que não apareça na lista acima. Se o cliente perguntar ou pedir salada, confirme que sim e inclua nos acompanhamentos dele. Nunca diga que não tem, nunca chame atendente por causa de salada.]';
